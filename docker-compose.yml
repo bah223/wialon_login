@@ -1,0 +1,20 @@
+version: '3'
+
+services:
+  app:
+    build: .
+    container_name: wialon_login_bot
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./screenshots:/app/screenshots
+    env_file:
+      - .env
+    networks:
+      - wialon_network
+
+networks:
+  wialon_network:
+    driver: bridge

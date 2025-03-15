@@ -1,0 +1,30 @@
+@dp.message(Command(commands=['token_list']))
+async def token_list_command(message: types.Message):
+    # ... (начало функции без изменений)
+    
+    for i, token_data in enumerate(user_tokens):
+        # ... (остальной код без изменений)
+        
+        # Добавляем информацию о сроке действия, если она есть
+        if "expire_time" in token_data and token_data["expire_time"]:
+            expire_time = int(token_data["expire_time"])
+            expire_str = datetime.datetime.fromtimestamp(expire_time).strftime('%Y-%m-%d %H:%M:%S')
+            # Проверяем, истек ли токен
+            if expire_time < time.time():
+                token_info += f"⚠️ <b>ИСТЕК:</b> {expire_str}\n"
+            else:
+                # Сколько дней осталось
+                days_left = (expire_time - time.time()) / 86400
+                hours_left = ((expire_time - time.time()) % 86400) / 3600
+                days_str = f"{int(days_left)} дн. {int(hours_left)} ч."
+                token_info += f"📅 <b>Действителен до:</b> {expire_str} "
+                if days_left < 3:
+                    token_info += f"(⚠️ осталось {days_str})\n"
+                else:
+                    token_info += f"({days_str})\n"
+        elif "duration" in token_data and token_data["duration"]:
+            duration_seconds = int(token_data["duration"])
+            days = duration_seconds // 86400
+            hours = (duration_seconds % 86400) // 3600
+            minutes = (duration_seconds % 3600) // 60
+            token_info += f"⌛ <b>Время действия:</b> {days} дн. {hours} ч. {minutes} мин. ({duration_seconds} сек)\n" 

@@ -1,0 +1,8 @@
+# Основная конфигурация Tor
+SOCKSPort 9050  # Порт для SOCKS-прокси
+ControlPort 9051  # Порт для управления Tor
+DataDirectory /var/lib/tor  # Директория для данных Tor
+
+# Настройки безопасности
+CookieAuthentication 1  # Использовать файлы cookie для аутентификации
+CookieAuthFileGroupReadable 1  # Разрешить чтение файла cookie группой 

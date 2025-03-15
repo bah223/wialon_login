@@ -1,0 +1,1578 @@
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import FSInputFile
+from app.scraper import wialon_login_and_get_url, make_api_request
+from app.utils import logger, get_env_variable, get_bool_env_variable
+from app.storage import token_storage
+from app.states import GetTokenStates
+import time
+import re
+import json
+import urllib.parse
+import socket
+import os
+
+# Получаем токен бота из переменных окружения
+bot = Bot(token=get_env_variable("BOT_TOKEN"))
+dp = Dispatcher(storage=MemoryStorage())
+
+@dp.message(Command(commands=['start', 'help']))
+async def start_command(message: types.Message):
+    """Обработчик команды /start и /help."""
+    help_text = """
+🤖 Wialon Login Bot
+
+Доступные команды:
+/get_token - Получить Access Token (через браузер)
+/check_token - Проверить Access Token и получить данные сессии
+/token_list - Список сохраненных токенов
+/create_token - Создать новый токен
+/help - Показать это сообщение
+    """
+    await message.reply(help_text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command(commands=['get_token']))
+async def get_token_command(message: types.Message, state: FSMContext):
+    """Получить Access Token через браузер."""
+    # Создаем клавиатуру для выбора режима подключения
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="🔒 Через Tor", callback_data="use_tor:yes"),
+                types.InlineKeyboardButton(text="🚀 Напрямую", callback_data="use_tor:no")
+            ]
+        ]
+    )
+    
+    # Формируем сообщение
+    message_text = "Выберите режим подключения к Wialon:"
+    
+    await message.reply(message_text, reply_markup=keyboard)
+    await state.set_state(GetTokenStates.connection_mode_choice)
+
+@dp.message(Command(commands=['check_token']))
+async def check_token_command(message: types.Message, state: FSMContext):
+    """Проверить Access Token и получить данные сессии."""
+    # Проверяем, есть ли токен в аргументах команды
+    command_args = message.text.split(maxsplit=1)
+    if len(command_args) > 1:
+        # Если токен передан в команде, используем его
+        token = command_args[1].strip()
+        logger.info(f"Token provided in command: {token[:10]}...")
+        
+        # Сохраняем токен в состоянии
+        await state.update_data(token=token)
+        
+        # Переходим к выбору режима проверки
+        await choose_check_mode(message, state)
+        return
+    
+    # Получаем последний токен пользователя
+    user_tokens = token_storage.get_user_tokens(message.from_user.id)
+    
+    # Создаем клавиатуру для выбора действия
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="✏️ Ввести токен вручную", 
+                    callback_data="check_token_manual"
+                )
+            ]
+        ]
+    )
+    
+    # Если есть сохраненные токены, добавляем кнопку для проверки последнего
+    if user_tokens:
+        keyboard.inline_keyboard.insert(0, [
+            types.InlineKeyboardButton(
+                text="🔄 Проверить последний токен", 
+                callback_data="check_last_token"
+            )
+        ])
+        
+        # Показываем часть последнего токена
+        last_token = user_tokens[0]["token"]
+        token_preview = f"{last_token[:10]}...{last_token[-10:]}" if len(last_token) > 25 else last_token
+        
+        await message.reply(
+            f"Выберите действие:\n\n"
+            f"Последний сохраненный токен:\n<code>{token_preview}</code>",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        # Если у пользователя нет сохраненных токенов
+        await message.reply(
+            "❌ У вас нет сохраненных токенов.\n\n" 
+            "Выберите действие:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+
+async def choose_check_mode(message: types.Message, state: FSMContext):
+    """Выбор режима проверки токена."""
+    # Создаем клавиатуру для выбора режима подключения
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="🔒 Через Tor", callback_data="check_tor:yes"),
+                types.InlineKeyboardButton(text="🚀 Напрямую", callback_data="check_tor:no")
+            ]
+        ]
+    )
+    
+    # Проверяем доступность Tor
+    import socket
+    tor_available = False
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        # Используем имя хоста из переменных окружения
+        tor_host = get_env_variable("TOR_HOST", "tor_proxy")
+        tor_port = int(get_env_variable("TOR_PORT", "9050"))
+        sock.connect((tor_host, tor_port))
+        sock.close()
+        tor_available = True
+    except Exception as e:
+        logger.warning(f"Tor is not available: {e}")
+    
+    # Формируем сообщение с учетом доступности Tor
+    message_text = "Выберите режим подключения для проверки токена:"
+    if not tor_available:
+        message_text += "\n\n⚠️ <b>Внимание!</b> Tor недоступен или не запущен. " \
+                        "Для использования Tor убедитесь, что он установлен и запущен."
+    
+    await message.reply(message_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    await state.set_state(GetTokenStates.check_token_mode)
+
+@dp.message(Command(commands=['token_list']))
+async def token_list_command(message: types.Message):
+    """Список сохраненных токенов."""
+    user_tokens = token_storage.get_user_tokens(message.from_user.id)
+    
+    if not user_tokens:
+        await message.reply(
+            "❌ У вас нет сохраненных токенов.\n"
+            "Используйте /get_token для получения нового токена."
+        )
+        return
+    
+    # Создаем компактное представление списка токенов
+    import datetime
+    
+    # Заголовок сообщения
+    tokens_list = f"🔑 <b>Список сохраненных токенов ({len(user_tokens)}):</b>\n\n"
+    
+    # Добавляем информацию о каждом токене в компактном виде
+    for i, token_data in enumerate(user_tokens):
+        token = token_data["token"]
+        token_short = f"{token[:15]}...{token[-15:]}" if len(token) > 35 else token
+        
+        # Базовая информация о токене
+        tokens_list += f"<b>{i+1}.</b> <code>{token_short}</code>\n"
+        
+        # Добавляем имя пользователя, если есть
+        if "user_name" in token_data:
+            tokens_list += f"   👤 {token_data['user_name']}"
+            if "user_id" in token_data:
+                tokens_list += f" (ID: {token_data['user_id']})"
+            tokens_list += "\n"
+        
+        # Добавляем время получения токена
+        created_time = int(token_data.get('created_at', 0))
+        if created_time > 0:
+            time_str = datetime.datetime.fromtimestamp(created_time).strftime('%Y-%m-%d %H:%M')
+            tokens_list += f"   ⏰ {time_str}"
+        
+        # Добавляем информацию о сроке действия
+        if token_data.get("is_permanent", False):
+            tokens_list += " | ⌛ Бессрочный\n"
+        elif "expire_time" in token_data and token_data["expire_time"]:
+            expire_time = int(token_data["expire_time"])
+            # Проверяем, истек ли токен
+            if expire_time < time.time():
+                tokens_list += " | ⚠️ <b>ИСТЕК</b>\n"
+            else:
+                # Сколько дней осталось
+                days_left = (expire_time - time.time()) / 86400
+                if days_left < 3:
+                    tokens_list += f" | ⚠️ <b>Осталось {int(days_left)} дн.</b>\n"
+                else:
+                    tokens_list += f" | 📅 Осталось {int(days_left)} дн.\n"
+        elif "duration" in token_data and token_data["duration"]:
+            duration_seconds = int(token_data["duration"])
+            days = duration_seconds // 86400
+            tokens_list += f" | ⌛ {days} дн.\n"
+        else:
+            tokens_list += "\n"
+        
+        # Добавляем разделитель между токенами
+        if i < len(user_tokens) - 1:
+            tokens_list += "───────────────────\n"
+    
+    # Добавляем инструкцию по использованию команд
+    tokens_list += "\n<i>Используйте команды:</i>\n"
+    tokens_list += "/check_token - <i>проверить последний токен</i>\n"
+    tokens_list += "/delete_token - <i>удалить токен</i>\n"
+    
+    # Создаем клавиатуру с кнопками для действий со всеми токенами
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="🔍 Проверить последний",
+                    callback_data=f"check_token:{user_tokens[0]['token'][:30]}"
+                ),
+                types.InlineKeyboardButton(
+                    text="🗑 Удалить все",
+                    callback_data="delete_all_tokens"
+                )
+            ]
+        ]
+    )
+    
+    # Отправляем сообщение со списком всех токенов
+    await message.reply(tokens_list, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+@dp.callback_query(lambda c: c.data == "check_token_manual")
+async def process_check_token_manual(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик для ручного ввода токена."""
+    try:
+        await callback_query.answer()
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback query: {e}")
+        # Продолжаем обработку даже при ошибке ответа на callback
+    
+    try:
+        await callback_query.message.edit_text(
+            "Пожалуйста, введите токен для проверки:\n\n"
+            "<i>Вы также можете использовать команду в формате:</i>\n"
+            "<code>/check_token YOUR_TOKEN</code>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось изменить сообщение: {e}")
+        # Отправляем новое сообщение вместо редактирования старого
+        await callback_query.message.reply(
+            "Пожалуйста, введите токен для проверки:\n\n"
+            "<i>Вы также можете использовать команду в формате:</i>\n"
+            "<code>/check_token YOUR_TOKEN</code>",
+            parse_mode=ParseMode.HTML
+        )
+    
+    # Устанавливаем состояние для ожидания ввода токена
+    await state.set_state(GetTokenStates.waiting_for_token_input)
+
+@dp.callback_query(lambda c: c.data == "check_last_token")
+async def process_check_last_token(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик для проверки последнего токена."""
+    try:
+        await callback_query.answer()
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback query: {e}")
+        # Продолжаем обработку даже при ошибке ответа на callback
+    
+    # Получаем последний токен пользователя
+    user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+    
+    if not user_tokens:
+        await callback_query.message.edit_text(
+            "❌ Не удалось найти сохраненные токены.\n"
+            "Пожалуйста, используйте /get_token для получения нового токена."
+        )
+        return
+    
+    # Сохраняем токен в состоянии
+    await state.update_data(token=user_tokens[0]["token"])
+    
+    # Переходим к выбору режима проверки
+    await choose_check_mode(callback_query.message, state)
+
+@dp.message(GetTokenStates.waiting_for_token_input)
+async def process_token_input(message: types.Message, state: FSMContext):
+    """Обработка ввода токена вручную."""
+    # Получаем введенный токен
+    token = message.text.strip()
+    
+    if not token:
+        await message.reply("❌ Токен не может быть пустым. Пожалуйста, введите токен.")
+        return
+    
+    # Сохраняем токен в состоянии
+    await state.update_data(token=token)
+    logger.info(f"Token manually entered: {token[:10]}...")
+    
+    # Переходим к выбору режима проверки
+    await choose_check_mode(message, state)
+
+@dp.message(GetTokenStates.manual_input_username)
+async def process_manual_username(message: types.Message, state: FSMContext):
+    """Обработка ручного ввода имени пользователя."""
+    await state.update_data(username=message.text)
+    await state.set_state(GetTokenStates.manual_input_password)
+    await message.reply("Введите пароль Wialon:")
+
+@dp.message(GetTokenStates.manual_input_password)
+async def process_manual_password(message: types.Message, state: FSMContext):
+    """Обработка ручного ввода пароля и запуск процесса получения токена."""
+    await state.update_data(password=message.text)
+    await get_token_process(message, state)
+
+async def get_token_process(message: types.Message, state: FSMContext):
+    """Процесс получения токена."""
+    logger.info("Starting token retrieval process...")
+    
+    # Получаем данные из состояния
+    data = await state.get_data()
+    username = data.get("username")
+    password = data.get("password")
+    
+    # Получаем настройку использования Tor из состояния или по умолчанию
+    use_tor = data.get("use_tor", get_bool_env_variable("USE_TOR", False))
+    
+    try:
+        # Если учетные данные не указаны, используем переменные окружения
+        if not username:
+            username = get_env_variable("WIALON_USERNAME")
+        if not password:
+            password = get_env_variable("WIALON_PASSWORD")
+        
+        # Получаем URL Wialon
+        try:
+            wialon_url = get_env_variable("WIALON_BASE_URL")
+        except:
+            wialon_url = "https://hosting.wialon.com/login.html?duration=0"
+            logger.warning(f"WIALON_BASE_URL not found, using default: {wialon_url}")
+    except Exception as e:
+        logger.error(f"Error getting credentials: {e}")
+        await message.reply(f"❌ Ошибка получения учетных данных: {str(e)}")
+        await state.clear()
+        return
+    
+    # Отправляем сообщение о начале процесса авторизации
+    status_message = await message.reply(
+        f"🔄 Выполняется вход в Wialon{' через Tor' if use_tor else ' напрямую'}..."
+    )
+    
+    # Выполняем вход в систему и получаем токен
+    try:
+        result = await wialon_login_and_get_url(username, password, wialon_url, use_tor=use_tor)
+        
+        # Проверяем, что получили строку (старый формат) или словарь (новый формат)
+        if isinstance(result, dict):
+            token = result.get("token", "")
+            full_url = result.get("url", "")
+            screenshot = result.get("screenshot")
+        else:
+            # Обратная совместимость со старым форматом
+            token = result
+            full_url = result
+            screenshot = None
+        
+        # Добавляем логирование для отладки
+        logger.debug(f"Token type: {type(token)}, value: {token[:70]}")
+        
+        # Всегда извлекаем и отображаем URL
+        url_info = f"\n\n🌐 <b>URL:</b>\n<code>{full_url}</code>"
+        
+        # Проверяем на наличие ошибки
+        if token.startswith("Error:"):
+            error_message = f"❌ {token}{url_info}"
+            
+            # Если есть скриншот, отправляем его
+            if screenshot and os.path.exists(screenshot):
+                await status_message.edit_text(f"❌ Произошла ошибка. Отправляю скриншот...", parse_mode=ParseMode.HTML)
+                try:
+                    # Используем FSInputFile для отправки файла
+                    photo = FSInputFile(screenshot)
+                    await message.answer_photo(
+                        photo, 
+                        caption=error_message,
+                        parse_mode=ParseMode.HTML
+                    )
+                    # Удаляем временный файл скриншота
+                    try:
+                        os.remove(screenshot)
+                    except:
+                        pass
+                except Exception as photo_error:
+                    logger.error(f"Error sending photo: {photo_error}")
+                    # Если не удалось отправить фото, отправляем только текст
+                    await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
+            else:
+                await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
+            
+            await state.clear()
+            return
+        
+        # Успешно получили токен, сохраняем его
+        user_id = message.from_user.id
+        logger.debug(f"User ID type: {type(user_id)}, value: {user_id}")
+        await token_storage.add_token(user_id=user_id, token=token)
+        
+        # Преобразуем токен в строку, если это не строка
+        token_str = str(token)
+        # Отображаем токен полностью без сокращения
+        token_display = token_str
+        
+        await status_message.edit_text(
+            f"✅ Токен успешно получен и сохранен!\n\n"
+            f"🔑 <code>{token_display}</code>\n\n"
+            f"{url_info}\n\n"
+            f"Используйте /check_token чтобы узнать информацию о токене.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Error in get_token_process: {e}")
+        # Добавляем трассировку стека для более подробной информации об ошибке
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Всегда пытаемся отобразить URL, даже при ошибке
+        url_info = ""
+        if 'full_url' in locals():
+            url_info = f"\n\n🌐 <b>URL:</b>\n<code>{full_url}</code>"
+        
+        error_message = f"❌ <b>Произошла ошибка:</b> {str(e)}{url_info}"
+        
+        # Если есть скриншот, отправляем его
+        if 'screenshot' in locals() and screenshot and os.path.exists(screenshot):
+            try:
+                await status_message.edit_text(f"❌ Произошла ошибка. Отправляю скриншот...", parse_mode=ParseMode.HTML)
+                # Используем FSInputFile для отправки файла
+                photo = FSInputFile(screenshot)
+                await message.answer_photo(
+                    photo, 
+                    caption=error_message,
+                    parse_mode=ParseMode.HTML
+                )
+                # Удаляем временный файл скриншота
+                try:
+                    os.remove(screenshot)
+                except:
+                    pass
+            except Exception as photo_error:
+                logger.error(f"Error sending photo: {photo_error}")
+                # Если не удалось отправить фото, отправляем только текст
+                await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
+        else:
+            await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
+    finally:
+        await state.clear()
+        logger.info("State cleared")
+
+@dp.message(Command(commands=['delete_token']))
+async def delete_token_command(message: types.Message):
+    """Удалить сохраненный токен."""
+    user_tokens = token_storage.get_user_tokens(message.from_user.id)
+    
+    if not user_tokens:
+        await message.reply(
+            "❌ У вас нет сохраненных токенов.\n"
+            "Используйте /get_token для получения нового токена."
+        )
+        return
+    
+    # Создаем клавиатуру с токенами для удаления
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    
+    for token_data in user_tokens:
+        token = token_data["token"]
+        # Краткое описание токена
+        token_label = f"{token[:8]}... - "
+        if "user_name" in token_data:
+            token_label += token_data["user_name"]
+        else:
+            created_time = int(token_data.get('created_at', 0))
+            import datetime
+            time_str = datetime.datetime.fromtimestamp(created_time).strftime('%Y-%m-%d %H:%M')
+            token_label += f"Получен: {time_str}"
+            
+        keyboard.add(types.InlineKeyboardButton(
+            text=f"🗑️ {token_label}",
+            callback_data=f"delete_token:{token[:15]}"  # Передаем только начало токена
+        ))
+    
+    await message.reply(
+        "🗑️ <b>Выберите токен для удаления:</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(lambda c: c.data.startswith("delete_token:"))
+async def delete_token_callback(callback_query: types.CallbackQuery):
+    """Обработчик удаления токена."""
+    try:
+        await bot.answer_callback_query(callback_query.id)
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback query: {e}")
+    
+    token_start = callback_query.data.split(":", 1)[1]
+    status_message = await callback_query.message.reply("🔄 Удаление токена...")
+    
+    try:
+        # Получаем все токены пользователя
+        user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+        
+        if not user_tokens:
+            await status_message.edit_text("❌ У вас нет сохраненных токенов.")
+            return
+        
+        found_token = None
+        for token_data in user_tokens:
+            token = token_data["token"]
+            if token.startswith(token_start):
+                found_token = token
+                break
+        
+        if not found_token:
+            await status_message.edit_text("❌ Токен не найден.")
+            return
+        
+        # Удаляем токен через API
+        import aiohttp
+        import json
+        
+        try:
+            wialon_api_url = get_env_variable("WIALON_API_URL")
+        except:
+            wialon_api_url = "https://hst-api.wialon.com/wialon/ajax.html"
+            logger.warning(f"WIALON_API_URL not found, using default: {wialon_api_url}")
+        
+        async with aiohttp.ClientSession() as session:
+            # Шаг 1: Авторизация токеном
+            login_params = {
+                "svc": "token/login",
+                "params": json.dumps({
+                    "token": found_token
+                })
+            }
+            
+            async with session.get(wialon_api_url, params=login_params) as response:
+                result = await response.json()
+                
+                if "error" in result:
+                    await status_message.edit_text(
+                        f"❌ Ошибка при авторизации: {result.get('error')}"
+                    )
+                    return
+                
+                session_id = result.get("eid")
+                token_str = result.get("user", {}).get("token", "")
+                
+                # Извлекаем h (имя токена) из токена - первые 72 символа
+                token_h = found_token[:72]
+                
+                # Шаг 2: Удаляем токен через token/update
+                delete_params = {
+                    "svc": "token/update",
+                    "params": json.dumps({
+                        "callMode": "delete",
+                        "userId": user_id  # Используем ID пользователя вместо h
+                    }),
+                    "sid": session_id
+                }
+                
+                async with session.get(wialon_api_url, params=delete_params) as delete_response:
+                    delete_result = await delete_response.json()
+                    
+                    # После удаления через API, удаляем из локального хранилища
+                    token_storage.delete_token(found_token)
+                    
+                    await status_message.edit_text("✅ Токен успешно удален!")
+            
+            # Обновляем сообщение с информацией о токене
+            try:
+                await callback_query.message.edit_text(
+                    callback_query.message.text + "\n\n<b>🗑️ Токен удален!</b>",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.warning(f"Could not update original message: {e}")
+    except Exception as e:
+        logger.error(f"Error deleting token: {e}")
+        await status_message.edit_text(f"❌ Ошибка при удалении токена: {str(e)}")
+
+@dp.callback_query(lambda c: c.data.startswith("check_token:"))
+async def process_check_specific_token(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик для проверки конкретного токена."""
+    await callback_query.answer()
+    
+    # Извлекаем токен из callback_data
+    token_prefix = callback_query.data.split(":")[1]
+    
+    # Находим полный токен по префиксу
+    user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+    full_token = None
+    
+    for token_data in user_tokens:
+        if token_data["token"].startswith(token_prefix):
+            full_token = token_data["token"]
+            break
+    
+    if not full_token:
+        await callback_query.message.reply("❌ Токен не найден. Возможно, он был удален.")
+        return
+    
+    # Сохраняем токен в состоянии
+    await state.update_data(token=full_token)
+    
+    # Переходим к выбору режима проверки
+    await choose_check_mode(callback_query.message, state)
+
+@dp.message(Command(commands=['list_all_tokens']))
+async def list_all_tokens_command(message: types.Message):
+    """
+    Получить полный список токенов пользователя.
+    
+    Примечание: Функция в работе, не все возможности реализованы.
+    """
+    # Получаем последний токен пользователя для авторизации
+    user_tokens = token_storage.get_user_tokens(message.from_user.id)
+    
+    if not user_tokens:
+        await message.reply(
+            "❌ У вас нет сохраненных токенов для авторизации.\n"
+            "Используйте /get_token для получения нового токена."
+        )
+        return
+    
+    # Используем последний токен
+    latest_token = user_tokens[0]["token"]
+    
+    status_message = await message.reply("🔄 Получение списка всех токенов...")
+    
+    try:
+        import aiohttp
+        import json
+        
+        # Получаем URL API
+        try:
+            wialon_api_url = get_env_variable("WIALON_API_URL")
+        except:
+            wialon_api_url = "https://hst-api.wialon.com/wialon/ajax.html"
+            logger.warning(f"WIALON_API_URL not found, using default: {wialon_api_url}")
+        
+        async with aiohttp.ClientSession() as session:
+            # Шаг 1: Авторизация токеном
+            login_params = {
+                "svc": "token/login",
+                "params": json.dumps({
+                    "token": latest_token
+                })
+            }
+            
+            async with session.get(wialon_api_url, params=login_params) as response:
+                login_result = await response.json()
+                
+                if "error" in login_result:
+                    await status_message.edit_text(
+                        f"❌ Ошибка при авторизации: {login_result.get('error')}"
+                    )
+                    return
+                
+                session_id = login_result.get("eid")
+                logger.info(f"Successfully logged in, session ID: {session_id}")
+                
+                # Получаем базовую информацию о токене
+                if "user" in login_result and "token" in login_result["user"]:
+                    token_str = login_result["user"]["token"]
+                    
+                    # Сначала попробуем декодировать URL-encoded символы
+                    try:
+                        decoded_token = urllib.parse.unquote(token_str)
+                        logger.debug(f"URL-decoded token: {decoded_token}")
+                        token_str = decoded_token
+                    except Exception as e:
+                        logger.warning(f"Error decoding URL-encoded token: {e}")
+                    
+                    # Форматируем сообщение с информацией о текущем токене в новом формате
+                    user_name = login_result.get("user", {}).get("nm", "Неизвестно")
+                    tokens_text = (
+                        f"🔑 <b>Информация о текущем токене:</b>\n\n"
+                        f"👤 <b>Пользователь:</b> {user_name}\n"
+                        f"👑 <b>ID пользователя:</b> {login_result['user'].get('id', 'Неизвестно')}\n"
+                        f"🔑 <b>EID:</b> {login_result.get('eid', 'Неизвестно')}\n"
+                        f"🌐 <b>Host:</b> {login_result.get('host', 'Неизвестно')}\n\n"
+                        f"ℹ️ <i>Примечание: К сожалению, API не предоставляет доступ к полному списку токенов. "
+                        f"Отображается информация только о текущем токене.</i>\n\n"
+                        f"📋 <b>Токен:</b>\n<code>{token_str}</code>\n"
+                    )
+                    
+                    # Добавляем информацию о времени действия, если она есть
+                    try:
+                        # Извлекаем dur (время действия)
+                        dur_match = re.search(r'"dur"\s*:\s*(\d+)', token_str)
+                        if dur_match:
+                            dur_value = int(dur_match.group(1))
+                            
+                            # Извлекаем app (название приложения)
+                            app_match = re.search(r'"app"\s*:\s*"([^"]+)"', token_str)
+                            app_name = app_match.group(1) if app_match else "Неизвестно"
+                            tokens_text += f"\n🔌 <b>Приложение:</b> {app_name}"
+                            
+                            # Извлекаем at (время активации) или ct (время создания)
+                            at_match = re.search(r'"at"\s*:\s*(\d+)', token_str)
+                            if not at_match:
+                                at_match = re.search(r'"ct"\s*:\s*(\d+)', token_str)
+                            
+                            at_value = int(at_match.group(1)) if at_match else int(time.time())
+                            at_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(at_value))
+                            tokens_text += f"\n⏱️ <b>Активирован:</b> {at_str}"
+                            
+                            # Обработка времени действия
+                            if dur_value == 0:
+                                # Токен "бессрочный"
+                                tokens_text += f"\n⌛️ <b>Время действия:</b> <i>100 дней (условно бессрочный)</i>"
+                                # Вычисляем условную дату окончания (100 дней)
+                                approx_end_time = at_value + 8640000  # 100 дней в секундах
+                                end_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(approx_end_time))
+                                tokens_text += f"\n📅 <b>Действителен до:</b> {end_str} (при бездействии)"
+                            else:
+                                # Токен с ограниченным сроком
+                                days = dur_value // 86400
+                                hours = (dur_value % 86400) // 3600
+                                minutes = (dur_value % 3600) // 60
+                                
+                                dur_str = f"{days} дн."
+                                if hours > 0:
+                                    dur_str += f" {hours} ч."
+                                elif hours > 0:
+                                    dur_str = f"{hours} ч. {minutes} мин."
+                                else:
+                                    dur_str = f"{minutes} мин."
+                                
+                                tokens_text += f"\n⌛️ <b>Время действия:</b> {dur_str}"
+                                tokens_text += f"\n📅 <b>Действителен до:</b> {end_str}"
+                                
+                                # Проверяем, истек ли токен
+                                end_time = at_value + dur_value
+                                if end_time < time.time():
+                                    tokens_text += f"\n⚠️ <b>ВНИМАНИЕ! Токен истек!</b>"
+                                else:
+                                    # Предупреждение о скором истечении
+                                    remaining = end_time - int(time.time())
+                                    if remaining > 0 and remaining < 259200:  # 3 дня в секундах
+                                        rem_days = remaining // 86400
+                                        rem_hours = (remaining % 86400) // 3600
+                                        tokens_text += f"\n⚠️ <b>Внимание!</b> Токен истекает через {rem_days} дн. {rem_hours} ч.!"
+                    except Exception as e:
+                        logger.error(f"Error extracting token duration: {e}")
+                        tokens_text += "\n⚠️ <i>Не удалось определить время действия токена</i>"
+                else:
+                    tokens_text = "❌ Не удалось получить информацию о токене."
+                
+                # Временно отключаем кнопки, которые не работают
+                keyboard = None
+
+                # Отправляем сообщение с информацией о токене
+                await status_message.edit_text(tokens_text, parse_mode=ParseMode.HTML)
+                
+    except Exception as e:
+        logger.error(f"Error listing tokens: {e}")
+        await status_message.edit_text(f"❌ Ошибка при получении списка токенов: {str(e)}")
+
+@dp.callback_query(lambda c: c.data.startswith("logout_session:"))
+async def logout_session_callback(callback_query: types.CallbackQuery):
+    """Обработчик закрытия сессии по запросу пользователя."""
+    try:
+        await bot.answer_callback_query(callback_query.id)
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback query: {e}")
+    
+    session_id = callback_query.data.split(":", 1)[1]
+    status_message = await callback_query.message.reply("🔄 Закрытие сессии...")
+    
+    try:
+        import aiohttp
+        import json
+        
+        # Получаем URL API
+        try:
+            wialon_api_url = get_env_variable("WIALON_API_URL")
+        except:
+            wialon_api_url = "https://hst-api.wialon.com/wialon/ajax.html"
+            logger.warning(f"WIALON_API_URL not found, using default: {wialon_api_url}")
+        
+        async with aiohttp.ClientSession() as session:
+            logout_params = {
+                "svc": "core/logout",
+                "params": json.dumps({}),
+                "sid": session_id
+            }
+            
+            async with session.get(wialon_api_url, params=logout_params) as logout_response:
+                logout_result = await logout_response.json()
+                
+                if "error" in logout_result:
+                    await status_message.edit_text(
+                        f"❌ Ошибка при закрытии сессии: {logout_result.get('error')}"
+                    )
+                else:
+                    await status_message.edit_text("✅ Сессия успешно закрыта!")
+                    
+                    # Обновляем сообщение с информацией о токене
+                    try:
+                        await callback_query.message.edit_text(
+                            callback_query.message.text + "\n\n<b>🔒 Сессия закрыта!</b>",
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not update original message: {e}")
+    except Exception as e:
+        logger.error(f"Error during session logout: {e}")
+        await status_message.edit_text(f"❌ Ошибка при закрытии сессии: {str(e)}")
+
+@dp.callback_query(lambda c: c.data == "list_all_tokens")
+async def list_all_tokens_callback(callback_query: types.CallbackQuery):
+    """Обработчик обновления списка токенов."""
+    try:
+        await bot.answer_callback_query(callback_query.id)
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback query: {e}")
+    
+    # Вызываем функцию получения списка токенов
+    await list_all_tokens_command(callback_query.message)
+
+@dp.callback_query(lambda c: c.data.startswith("extend_token:"))
+async def extend_token_callback(callback_query: types.CallbackQuery):
+    """Обработчик продления срока действия токена."""
+    try:
+        await bot.answer_callback_query(callback_query.id)
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback query: {e}")
+    
+    token_start = callback_query.data.split(":", 1)[1]
+    status_message = await callback_query.message.reply("🔄 Продление токена...")
+    
+    try:
+        # Получаем все токены пользователя
+        user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+        
+        if not user_tokens:
+            await status_message.edit_text("❌ У вас нет сохраненных токенов.")
+            return
+        
+        found_token = None
+        for token_data in user_tokens:
+            token = token_data["token"]
+            if token.startswith(token_start):
+                found_token = token
+                break
+        
+        if not found_token:
+            await status_message.edit_text("❌ Токен не найден.")
+            return
+        
+        # Продление токена через token/update API
+        import aiohttp
+        import json
+        
+        try:
+            wialon_api_url = get_env_variable("WIALON_API_URL")
+        except:
+            wialon_api_url = "https://hst-api.wialon.com/wialon/ajax.html"
+            logger.warning(f"WIALON_API_URL not found, using default: {wialon_api_url}")
+        
+        async with aiohttp.ClientSession() as session:
+            # Шаг 1: Авторизация токеном
+            login_params = {
+                "svc": "token/login",
+                "params": json.dumps({
+                    "token": found_token
+                })
+            }
+            
+            async with session.get(wialon_api_url, params=login_params) as response:
+                result = await response.json()
+                
+                if "error" in result:
+                    await status_message.edit_text(
+                        f"❌ Ошибка при авторизации: {result.get('error')}"
+                    )
+                    return
+                
+                session_id = result.get("eid")
+                token_str = result.get("user", {}).get("token", "")
+                
+                # Декодируем URL-encoded строку токена
+                try:
+                    decoded_token = urllib.parse.unquote(token_str)
+                    token_str = decoded_token
+                except Exception as e:
+                    logger.warning(f"Error decoding URL-encoded token: {e}")
+                
+                # Извлекаем h (имя токена) из токена - первые 72 символа
+                token_h = found_token[:72]
+                
+                # Получаем информацию о приложении
+                app_match = re.search(r'"app"\s*:\s*"([^"]+)"', token_str)
+                app_name = app_match.group(1) if app_match else "Wialon Hosting"
+                
+                # Шаг 2: Продление токена с помощью token/update API
+                update_params = {
+                    "svc": "token/update",
+                    "params": json.dumps({
+                        "callMode": "update",
+                        "userId": user_id,  # Используем ID пользователя
+                        "dur": 8640000,  # 100 дней в секундах
+                        "app": app_name,
+                        "at": 0,  # Активировать прямо сейчас
+                        "fl": 256,  # Базовый доступ
+                        "p": "{}"
+                    }),
+                    "sid": session_id
+                }
+                
+                async with session.get(wialon_api_url, params=update_params) as update_response:
+                    update_result = await update_response.json()
+                    
+                    if "error" in update_result:
+                        await status_message.edit_text(
+                            f"❌ Ошибка при продлении токена: {update_result.get('error')}"
+                        )
+                        return
+                    
+                    # Получаем обновленную информацию о токене
+                    dur_value = update_result.get("dur", 0)
+                    at_value = update_result.get("at", int(time.time()))
+                    end_time = at_value + dur_value
+                    end_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))
+                    
+                    # Обновляем информацию о токене в хранилище
+                    token_storage.update_token_data(found_token, {
+                        "duration": dur_value,
+                        "is_permanent": dur_value == 0,
+                        "expire_time": end_time if dur_value > 0 else at_value + 8640000,
+                        "created_time": at_value,
+                        "token_name": app_name,
+                        "last_checked": int(time.time())
+                    })
+                    
+                    await status_message.edit_text(
+                        f"✅ Токен успешно продлен!\n\n"
+                        f"⌛ <b>Новый срок действия:</b> 100 дней\n"
+                        f"📅 <b>Действителен до:</b> {end_time_str}\n",
+                        parse_mode="HTML"
+                    )
+                    
+                    # Обновляем исходное сообщение
+                    try:
+                        await check_token_command(callback_query.message, found_token)
+                    except Exception as e:
+                        logger.error(f"Error refreshing token info: {e}")
+    except Exception as e:
+        logger.error(f"Error extending token: {e}")
+        await status_message.edit_text(f"❌ Ошибка при продлении токена: {str(e)}")
+
+@dp.callback_query(lambda c: c.data.startswith("use_tor:"))
+async def process_connection_mode(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора режима подключения (через Tor или напрямую)."""
+    await callback_query.answer()
+    
+    # Извлекаем выбор пользователя
+    use_tor = callback_query.data.split(":")[1] == "yes"
+    
+    # Сохраняем выбор в состоянии
+    await state.update_data(use_tor=use_tor)
+    
+    # Отправляем сообщение о выбранном режиме
+    mode_text = "🔒 Через Tor" if use_tor else "🚀 Напрямую"
+    await callback_query.message.edit_text(
+        f"Выбран режим подключения: {mode_text}\n\n"
+        "Введите ваш логин для Wialon:"
+    )
+    
+    # Переходим к вводу логина
+    await state.set_state(GetTokenStates.manual_input_username)
+
+@dp.callback_query(lambda c: c.data.startswith("check_tor:"))
+async def process_check_token_mode(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик выбора режима проверки токена."""
+    try:
+        await callback_query.answer()
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback query: {e}")
+        # Продолжаем обработку даже при ошибке ответа на callback
+    
+    # Получаем выбранный режим
+    use_tor = callback_query.data.split(":")[1] == "yes"
+    
+    # Получаем токен из состояния
+    data = await state.get_data()
+    token = data.get("token", "")
+    
+    if not token:
+        await callback_query.message.reply("❌ Токен не найден. Пожалуйста, получите новый токен.")
+        await state.clear()
+        return
+    
+    # Проверяем токен
+    await check_token_process(callback_query.message, token, use_tor, state)
+
+async def check_token_process(message: types.Message, token: str, use_tor: bool = None, state: FSMContext = None):
+    """Процесс проверки токена."""
+    # Если не указано явно, получаем настройку Tor из конфига
+    if use_tor is None:
+        use_tor = get_bool_env_variable("USE_TOR", False)
+    
+    status_message = await message.reply(
+        f"🔄 Проверка токена{' через Tor' if use_tor else ' напрямую'}..."
+    )
+    
+    try:
+        import json
+        import re
+        
+        # Получаем URL API
+        try:
+            wialon_api_url = get_env_variable("WIALON_API_URL")
+        except:
+            wialon_api_url = "https://hst-api.wialon.com/wialon/ajax.html"
+            logger.warning(f"WIALON_API_URL not found, using default: {wialon_api_url}")
+        
+        # Добавляем логирование для отладки
+        logger.debug(f"Checking token: {token[:10]}...")
+        logger.debug(f"API URL: {wialon_api_url}")
+        
+        # Параметры для запроса авторизации токеном
+        login_params = {
+            "svc": "token/login",
+            "params": json.dumps({
+                "token": token,
+                "fl": 7
+            })
+        }
+        
+        # Логируем параметры запроса
+        logger.debug(f"API request params: {login_params}")
+        
+        # Используем нашу функцию для запросов к API
+        login_result = await make_api_request(wialon_api_url, login_params, use_tor)
+        
+        # Логируем результат запроса
+        logger.debug(f"API response: {login_result}")
+        
+        # Проверяем на ошибки
+        if "error" in login_result:
+            error_code = login_result.get("error")
+            logger.error(f"API returned error: {error_code}")
+            if error_code == 1:
+                await status_message.edit_text("❌ Токен недействителен или истек срок его действия.")
+            elif error_code == 4:
+                await status_message.edit_text("❌ Некорректный формат токена.")
+            else:
+                await status_message.edit_text(f"❌ Ошибка при проверке токена: {error_code}")
+            return
+        
+        # Получаем базовую информацию о токене
+        if "user" in login_result and "token" in login_result:
+            # Получаем информацию о пользователе
+            user_name = login_result["user"].get("nm", "Неизвестно")
+            user_id = login_result["user"].get("id", "Неизвестно")
+            eid = login_result.get("eid", "Неизвестно")
+            host = login_result.get("host", "Неизвестно")
+            
+            logger.info(f"Token check successful for user: {user_name}, EID: {eid}")
+            
+            # Получаем информацию о токене
+            token_info = login_result.get("token", "{}")
+            logger.debug(f"Token info from API: {token_info}")
+            
+            # Парсим информацию о токене
+            token_data = {}
+            try:
+                # Пытаемся распарсить JSON в поле token
+                tokeninfo = safe_parse_json(token_info)
+                token_data.update(tokeninfo)
+            except Exception as e:
+                logger.error(f"Error parsing token info: {e}")
+            
+            # Форматируем сообщение с информацией о текущем токене в новом формате
+            tokens_text = (
+                f"🔑 <b>Информация о текущем токене:</b>\n\n"
+                f"👤 <b>Пользователь:</b> {user_name}\n"
+                f"👑 <b>ID пользователя:</b> {user_id}\n"
+                f"🔑 <b>EID:</b> {eid}\n"
+                f"🌐 <b>Host:</b> {host}\n\n"
+                f"ℹ️ <i>Примечание: К сожалению, API не предоставляет доступ к полному списку токенов. "
+                f"Отображается информация только о текущем токене.</i>\n\n"
+                f"📋 <b>Токен:</b>\n<code>{token}</code>\n"
+            )
+            
+            # Добавляем информацию о времени действия, если она есть
+            try:
+                # Получаем время действия токена
+                dur_value = token_data.get("dur")
+                if dur_value is not None:
+                    # Получаем название приложения
+                    app_name = token_data.get("app", "Wialon")
+                    # Декодируем URL-encoded строки
+                    if isinstance(app_name, str) and '%20' in app_name:
+                        app_name = urllib.parse.unquote(app_name)
+                    tokens_text += f"\n🔌 <b>Приложение:</b> {app_name}"
+                    
+                    # Получаем время активации токена
+                    at_value = token_data.get("at") or token_data.get("ct") or int(time.time())
+                    at_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(at_value))
+                    tokens_text += f"\n⏱️ <b>Активирован:</b> {at_str}"
+                    
+                    # Проверяем, бессрочный ли токен
+                    if dur_value == 0:
+                        # Для бессрочных токенов показываем условные 100 дней
+                        tokens_text += f"\n⌛️ <b>Время действия:</b> <i>100 дней (условно бессрочный)</i>"
+                        # Вычисляем условную дату окончания (100 дней)
+                        approx_end_time = at_value + 8640000  # 100 дней в секундах
+                        end_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(approx_end_time))
+                        tokens_text += f"\n📅 <b>Действителен до:</b> {end_str} (при бездействии)"
+                    else:
+                        # Вычисляем время окончания действия токена
+                        end_time = at_value + dur_value
+                        end_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))
+                        
+                        # Форматируем время действия
+                        days = dur_value // 86400
+                        hours = (dur_value % 86400) // 3600
+                        minutes = (dur_value % 3600) // 60
+                        
+                        if days > 0:
+                            dur_str = f"{days} дн."
+                            if hours > 0:
+                                dur_str += f" {hours} ч."
+                        elif hours > 0:
+                            dur_str = f"{hours} ч. {minutes} мин."
+                        else:
+                            dur_str = f"{minutes} мин."
+                        
+                        tokens_text += f"\n⌛️ <b>Время действия:</b> {dur_str}"
+                        tokens_text += f"\n📅 <b>Действителен до:</b> {end_str}"
+                        
+                        # Проверяем, истек ли токен
+                        if end_time < time.time():
+                            tokens_text += f"\n⚠️ <b>ВНИМАНИЕ! Токен истек!</b>"
+                        else:
+                            # Предупреждение о скором истечении
+                            remaining = end_time - int(time.time())
+                            if remaining > 0 and remaining < 259200:  # 3 дня в секундах
+                                rem_days = remaining // 86400
+                                rem_hours = (remaining % 86400) // 3600
+                                tokens_text += f"\n⚠️ <b>Внимание!</b> Токен истекает через {rem_days} дн. {rem_hours} ч.!"
+            except Exception as e:
+                logger.error(f"Error extracting token duration: {e}")
+                tokens_text += "\n⚠️ <i>Не удалось определить время действия токена</i>"
+        else:
+            logger.error(f"Unexpected API response structure: {login_result}")
+            tokens_text = "❌ Не удалось получить информацию о токене."
+        
+        # Временно отключаем кнопки, которые не работают
+        keyboard = None
+
+        # Отправляем сообщение с информацией о токене
+        await status_message.edit_text(tokens_text, parse_mode=ParseMode.HTML)
+        
+        # Очищаем состояние после проверки
+        if state:
+            await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Error checking token: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        await status_message.edit_text(f"❌ Ошибка при проверке токена: {str(e)}")
+        
+        # Очищаем состояние после ошибки
+        if state:
+            await state.clear()
+
+# Функция для безопасного парсинга JSON в поле token
+def safe_parse_json(json_str: str) -> dict:
+    """Безопасно парсит JSON строку, даже если она содержит экранированные кавычки или обрамлена кавычками."""
+    if not isinstance(json_str, str):
+        logger.warning(f"Expected string for JSON parsing, got {type(json_str)}")
+        return {}
+
+    # Лог первых 50 символов для отладки
+    logger.debug(f"Attempting to parse JSON: {json_str[:50]}...")
+    
+    # Специальный случай для Wialon token - по документации
+    # https://sdk.wialon.com/wiki/ru/sidebar/remoteapi/codesamples/login
+    # "token": "{"app":"Wialon Hosting","ct":1443682655,"at":1443682655,"dur":2592000,"fl":-1,"p":"{}","items":[]}"
+    if "app" in json_str and "dur" in json_str:
+        try:
+            import re
+            # Извлечение значения dur напрямую регулярным выражением
+            dur_match = re.search(r'"dur"\s*:\s*(\d+)', json_str)
+            if dur_match:
+                dur_value = int(dur_match.group(1))
+                logger.info(f"Extracted duration value: {dur_value} seconds ({dur_value//86400} days)")
+                
+                # Извлечение времени активации
+                at_match = re.search(r'"at"\s*:\s*(\d+)', json_str)
+                at_value = int(at_match.group(1)) if at_match else None
+                
+                # Если нет at, проверяем ct (время создания)
+                if not at_value:
+                    ct_match = re.search(r'"ct"\s*:\s*(\d+)', json_str)
+                    at_value = int(ct_match.group(1)) if ct_match else int(time.time())
+                at_value = int(at_match.group(1)) if at_match else int(time.time())
+                
+                # Извлекаем имени приложения
+                app_match = re.search(r'"app"\s*:\s*"([^"]+)"', json_str)
+                app_name = app_match.group(1) if app_match else "Wialon"
+                
+                return {
+                    "dur": dur_value,
+                    "at": at_value,
+                    "app": app_name
+                }
+        except Exception as e:
+            logger.error(f"Error extracting Wialon token data with regex: {e}")
+    
+    # Стандартные методы парсинга (без изменений)
+    try:
+        # Сначала пробуем напрямую парсить как есть
+        result = json.loads(json_str)
+        logger.debug("Successfully parsed JSON directly")
+        return result
+    except:
+        try:
+            # Если не удалось, пробуем удалить внешние кавычки и распарсить снова
+            if json_str.startswith('"') and json_str.endswith('"'):
+                cleaned = json_str[1:-1].replace('\\"', '"')
+                result = json.loads(cleaned)
+                logger.debug("Successfully parsed JSON after removing quotes")
+                return result
+        except:
+            pass
+        
+        try:
+            # Если и это не помогло, пробуем заменить одинарные кавычки на двойные
+            alt_json = json_str.replace("'", '"')
+            result = json.loads(alt_json)
+            logger.debug("Successfully parsed JSON after replacing single quotes")
+            return result
+        except:
+            pass
+    
+        try:
+            # Если все методы парсинга не сработали, попробуем регулярные выражения
+            import re
+            # Найдем значение dur
+            dur_match = re.search(r'"dur"\s*:\s*(\d+)', json_str)
+            if dur_match:
+                dur_value = int(dur_match.group(1))
+                logger.debug(f"Extracted dur={dur_value} using regex")
+                
+                # Найдем значение at или ct
+                at_match = re.search(r'"(?:at|ct)"\s*:\s*(\d+)', json_str)
+                at_value = int(at_match.group(1)) if at_match else 0
+                
+                return {"dur": dur_value, "at": at_value}
+        except:
+            pass
+    
+    logger.warning(f"Failed to parse JSON: {json_str[:30]}...")
+    # Возвращаем пустой словарь, если все методы парсинга не сработали
+    return {}
+
+@dp.callback_query(lambda c: c.data == "delete_all_tokens")
+async def process_delete_all_tokens(callback_query: types.CallbackQuery):
+    """Обработчик для удаления всех токенов пользователя."""
+    await callback_query.answer()
+    
+    # Получаем ID пользователя
+    user_id = callback_query.from_user.id
+    
+    # Создаем клавиатуру для подтверждения
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="✅ Да, удалить все",
+                    callback_data="confirm_delete_all"
+                ),
+                types.InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="cancel_delete_all"
+                )
+            ]
+        ]
+    )
+    
+    # Запрашиваем подтверждение
+    await callback_query.message.edit_text(
+        "⚠️ <b>Внимание!</b> Вы уверены, что хотите удалить <b>ВСЕ</b> сохраненные токены?\n\n"
+        "Это действие нельзя отменить.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "confirm_delete_all")
+async def process_confirm_delete_all(callback_query: types.CallbackQuery):
+    """Обработчик подтверждения удаления всех токенов."""
+    await callback_query.answer()
+    
+    # Получаем ID пользователя
+    user_id = callback_query.from_user.id
+    
+    # Удаляем все токены пользователя
+    token_storage.delete_all_user_tokens(user_id)
+    
+    # Сообщаем об успешном удалении
+    await callback_query.message.edit_text(
+        "✅ Все токены успешно удалены.",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "cancel_delete_all")
+async def process_cancel_delete_all(callback_query: types.CallbackQuery):
+    """Обработчик отмены удаления всех токенов."""
+    await callback_query.answer()
+    
+    # Возвращаемся к списку токенов
+    await token_list_command(callback_query.message)
+
+@dp.message(Command(commands=['create_token']))
+async def create_token_command(message: types.Message, state: FSMContext):
+    """Создать новый токен на основе существующего."""
+    # Получаем последний токен пользователя
+    user_tokens = token_storage.get_user_tokens(message.from_user.id)
+    
+    # Создаем клавиатуру для выбора токена
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
+    
+    # Добавляем кнопку для ввода токена вручную
+    keyboard.inline_keyboard.append([
+        types.InlineKeyboardButton(
+            text="✏️ Ввести токен вручную", 
+            callback_data="create_token_manual"
+        )
+    ])
+    
+    # Добавляем кнопки для имеющихся токенов, если они есть
+    if user_tokens:
+        for i, token_data in enumerate(user_tokens[:5]):  # Не более 5 токенов
+            token = token_data["token"]
+            token_preview = f"{token[:10]}...{token[-10:]}" if len(token) > 25 else token
+            
+            # Если есть имя пользователя, добавляем его
+            user_info = ""
+            if "user_name" in token_data:
+                user_info = f" ({token_data['user_name']})"
+            
+            keyboard.inline_keyboard.insert(i, [
+                types.InlineKeyboardButton(
+                    text=f"🔑 Токен #{i+1}{user_info}", 
+                    callback_data=f"token:{i}"
+                )
+            ])
+        
+        message_text = "Выберите токен, на основе которого будет создан новый токен:"
+    else:
+        message_text = "У вас нет сохраненных токенов. Введите токен вручную:"
+    
+    await message.reply(
+        message_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "create_token_manual")
+async def process_create_token_manual(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик для ручного ввода токена для создания нового."""
+    await callback_query.answer()
+    
+    await callback_query.message.edit_text(
+        "Пожалуйста, введите токен, на основе которого нужно создать новый:\n\n"
+        "<i>Формат: строка с токеном доступа Wialon</i>",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Устанавливаем состояние для ожидания ввода токена
+    await state.set_state(GetTokenStates.waiting_for_source_token)
+
+@dp.message(GetTokenStates.waiting_for_source_token)
+async def process_source_token_input(message: types.Message, state: FSMContext):
+    """Обработка ввода исходного токена."""
+    source_token = message.text.strip()
+    
+    if not source_token:
+        await message.reply("❌ Токен не может быть пустым. Пожалуйста, введите токен.")
+        return
+    
+    # Сохраняем токен в состоянии
+    await state.update_data(source_token=source_token)
+    
+    # Показываем выбор режима подключения
+    await show_connection_choice(message, state, source_token)
+
+async def show_connection_choice(message, state: FSMContext, token: str):
+    """Показать выбор режима подключения."""
+    await state.update_data(source_token=token)
+    
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="🔒 Через Tor", callback_data="create_token:yes"),
+                types.InlineKeyboardButton(text="🚀 Напрямую", callback_data="create_token:no")
+            ]
+        ]
+    )
+    
+    # Проверяем, это сообщение или колбэк
+    if hasattr(message, 'reply'):
+        # Это сообщение Message
+        await message.reply(
+            f"Выберите режим подключения для создания нового токена:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        # Это сообщение от callback_query
+        await message.edit_text(
+            f"Выберите режим подключения для создания нового токена:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+
+@dp.callback_query(lambda c: c.data.startswith("token:"))
+async def process_token_selection(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора токена из списка."""
+    # Получаем индекс токена
+    index = int(callback_query.data.split(":")[1])
+    user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+    token = user_tokens[index]["token"]
+    
+    # Сохраняем выбранный токен
+    await state.update_data(source_token=token)
+    
+    # Показываем выбор режима подключения
+    await show_connection_choice(callback_query.message, state, token)
+
+@dp.callback_query(lambda c: c.data.startswith("create_token:"))
+async def process_create_token(callback_query: types.CallbackQuery, state: FSMContext):
+    """Создание нового токена через API."""
+    try:
+        await callback_query.answer()
+        use_tor = callback_query.data.split(":")[1] == "yes"
+        
+        data = await state.get_data()
+        source_token = data.get("source_token")
+        
+        if not source_token:
+            await callback_query.message.edit_text("❌ Токен не найден")
+            return
+        
+        # Если токен - это словарь, извлекаем строку токена
+        if isinstance(source_token, dict):
+            source_token = source_token.get("token", "")
+        
+        # Очищаем токен от URL и других лишних данных
+        if isinstance(source_token, str):
+            # Если это URL или JSON, извлекаем только токен
+            if "access_token=" in source_token:
+                source_token = source_token.split("access_token=")[1].split("&")[0]
+            elif source_token.startswith("{") and "token" in source_token:
+                try:
+                    token_data = json.loads(source_token)
+                    source_token = token_data.get("token", source_token)
+                except:
+                    pass
+        
+        status_message = await callback_query.message.edit_text(
+            f"🔄 Создаем новый токен {'через Tor' if use_tor else 'напрямую'}..."
+        )
+        
+        # Получаем URL API
+        wialon_api_url = get_env_variable("WIALON_API_URL", "https://hst-api.wialon.com/wialon/ajax.html")
+        
+        # 1. Логин через token/login
+        login_params = {
+            "svc": "token/login",
+            "params": json.dumps({
+                "token": source_token,
+                "fl": 1
+            })
+        }
+        
+        logger.debug(f"Login params: {login_params}")
+        login_result = await make_api_request(wialon_api_url, login_params, use_tor)
+        logger.debug(f"Login result: {login_result}")
+        
+        if "error" in login_result:
+            await status_message.edit_text(f"❌ Ошибка авторизации: {login_result.get('error')}")
+            return
+        
+        # Получаем eid из результата логина
+        session_id = login_result.get("eid")
+        if not session_id:
+            await status_message.edit_text("❌ Не удалось получить ID сессии")
+            return
+        
+        logger.debug(f"Полученный ID сессии: {session_id}")
+        
+        # 2. Создание нового токена через token/create
+        create_params = {
+            "svc": "token/create",
+            "params": json.dumps({
+                "callMode": "create",  # Добавляем обязательный параметр
+                "app": "WialonHostingAPI",  # Используем более простое имя приложения
+                "at": 0,
+                "dur": 8640000,  # 100 дней в секундах
+                "fl": 4294967295,
+                "p": source_token  # Используем исходный токен как параметр
+            }),
+            "sid": session_id
+        }
+        
+        logger.debug(f"Create params: {create_params}")
+        create_result = await make_api_request(wialon_api_url, create_params, use_tor)
+        logger.debug(f"Create result: {create_result}")
+        
+        if "error" in create_result:
+            await status_message.edit_text(f"❌ Ошибка создания токена: {create_result.get('reason', create_result.get('error'))}")
+            return
+        
+        # Получаем новый токен из результата
+        new_token = create_result.get("h")  # В token/create, имя токена возвращается в поле "h"
+        if not new_token:
+            await status_message.edit_text("❌ Не удалось создать токен")
+            return
+        
+        # Сохраняем новый токен как дочерний от исходного
+        token_storage.add_token(callback_query.from_user.id, new_token, parent_token=source_token)
+        
+        # Сохраняем информацию о токене (время истечения и т.д.) если есть
+        token_info = {
+            "user_name": login_result.get("au"),
+            "expire_time": login_result.get("tm"),
+            "created_at": int(time.time())
+        }
+        token_storage.update_token_info(callback_query.from_user.id, new_token, token_info)
+        
+        await status_message.edit_text(
+            f"✅ Новый токен успешно создан!\n\n"
+            f"🔑 <code>{new_token}</code>",
+            parse_mode=ParseMode.HTML
+        )
+        
+    except Exception as e:
+        logger.error(f"Error creating token: {e}")
+        await callback_query.message.edit_text(f"❌ Произошла ошибка: {str(e)}")
+
+async def start_telegram_bot():
+    """Запускает Telegram бота."""
+    logger.info("Starting Telegram bot...")
+    await dp.start_polling(bot)
+
+async def main():
+    """Основная функция для запуска бота."""
+    await start_telegram_bot()
+
+if __name__ == '__main__':
+    asyncio.run(main())
