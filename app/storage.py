@@ -217,32 +217,124 @@ class TokenStorage:
         self._save_tokens()
 
     def update_token_info(self, user_id, token, token_info):
-        """
-        Обновляет информацию о токене.
+        """Обновляет информацию о токене.
         
         Args:
             user_id: ID пользователя
             token: Токен доступа
             token_info: Словарь с дополнительной информацией о токене
         """
+        # Создаем данные о токене
+        token_data = {
+            "user_id": user_id,
+            **token_info
+        }
+        
+        # Добавляем или обновляем информацию
+        self.tokens[token] = token_data
+        self._save_tokens()
+        logger.info(f"Добавлен новый токен с информацией для пользователя {user_id}")
+        return True
+
+    def save_credentials(self, user_id, username, password):
+        """
+        Сохраняет учетные данные пользователя для быстрой повторной авторизации.
+        
+        Args:
+            user_id: ID пользователя Telegram
+            username: Имя пользователя Wialon
+            password: Пароль пользователя Wialon (будет храниться в зашифрованном виде)
+        """
         user_id = str(user_id)
         
-        if user_id not in self.tokens:
-            logger.warning(f"Пользователь {user_id} не найден в хранилище токенов")
-            return False
+        # Простое шифрование пароля (не для реальной безопасности, а для того чтобы 
+        # пароль не хранился в открытом виде)
+        import base64
+        encrypted_password = base64.b64encode(password.encode()).decode()
         
-        # Находим токен в списке токенов пользователя
-        for i, token_data in enumerate(self.tokens[user_id]):
-            if token_data.get("token") == token:
-                # Обновляем информацию о токене
-                self.tokens[user_id][i].update(token_info)
-                self._save_tokens()
-                logger.info(f"Обновлена информация о токене для пользователя {user_id}")
-                return True
+        # Добавляем или обновляем учетные данные
+        if 'credentials' not in self.tokens:
+            self.tokens['credentials'] = {}
+            
+        self.tokens['credentials'][user_id] = {
+            "username": username,
+            "password": encrypted_password,
+            "saved_at": int(time.time())
+        }
         
-        logger.warning(f"Токен не найден для пользователя {user_id}")
-        return False
+        self._save_tokens()
+        logger.info(f"Сохранены учетные данные для пользователя {user_id}")
+        
+    def get_credentials(self, user_id):
+        """
+        Получает сохраненные учетные данные пользователя.
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            dict: Словарь с учетными данными или None
+        """
+        user_id = str(user_id)
+        
+        if 'credentials' not in self.tokens or user_id not in self.tokens['credentials']:
+            return None
+            
+        creds = self.tokens['credentials'][user_id]
+        
+        # Расшифровываем пароль
+        import base64
+        try:
+            password = base64.b64decode(creds['password'].encode()).decode()
+            return {
+                "username": creds['username'],
+                "password": password,
+                "saved_at": creds.get('saved_at', 0)
+            }
+        except Exception as e:
+            logger.error(f"Ошибка при расшифровке пароля: {e}")
+            return None
+            
+    def delete_credentials(self, user_id):
+        """
+        Удаляет сохраненные учетные данные пользователя.
+        
+        Args:
+            user_id: ID пользователя Telegram
+        """
+        user_id = str(user_id)
+        
+        if 'credentials' in self.tokens and user_id in self.tokens['credentials']:
+            del self.tokens['credentials'][user_id]
+            self._save_tokens()
+            logger.info(f"Удалены учетные данные пользователя {user_id}")
 
+    def export_user_tokens(self, user_id):
+        """
+        Экспортирует токены пользователя в формате JSON.
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            str: JSON-строка с токенами пользователя
+        """
+        user_id = str(user_id)
+        
+        # Получаем токены пользователя
+        user_tokens = self.get_user_tokens(user_id)
+        
+        if not user_tokens:
+            return json.dumps({"tokens": []})
+        
+        # Формируем данные для экспорта
+        export_data = {
+            "tokens": user_tokens,
+            "exported_at": int(time.time()),
+            "user_id": user_id
+        }
+        
+        return json.dumps(export_data, indent=2)
 
 # Создаем глобальный экземпляр хранилища в памяти, без файла на диске
 token_storage = TokenStorage() 
