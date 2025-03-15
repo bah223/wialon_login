@@ -15,6 +15,7 @@ import json
 import urllib.parse
 import socket
 import os
+import datetime
 
 # Получаем токен бота из переменных окружения
 bot = Bot(token=get_env_variable("BOT_TOKEN"))
@@ -31,6 +32,8 @@ async def start_command(message: types.Message):
 /check_token - Проверить Access Token и получить данные сессии
 /token_list - Список сохраненных токенов
 /create_token - Создать новый токен
+/token_create - Создать новый токен через API
+/token_update - Обновить существующий токен через API
 /help - Показать это сообщение
     """
     await message.reply(help_text, parse_mode=ParseMode.HTML)
@@ -152,92 +155,62 @@ async def choose_check_mode(message: types.Message, state: FSMContext):
 
 @dp.message(Command(commands=['token_list']))
 async def token_list_command(message: types.Message):
-    """Список сохраненных токенов."""
+    """Показать список сохраненных токенов."""
     user_tokens = token_storage.get_user_tokens(message.from_user.id)
     
     if not user_tokens:
-        await message.reply(
-            "❌ У вас нет сохраненных токенов.\n"
-            "Используйте /get_token для получения нового токена."
-        )
+        await message.reply("У вас нет сохраненных токенов.")
         return
     
-    # Создаем компактное представление списка токенов
-    import datetime
+    # Формируем ответ со списком токенов
+    response = f"🔑 <b>Сохраненные токены ({len(user_tokens)}):</b>\n\n"
     
-    # Заголовок сообщения
-    tokens_list = f"🔑 <b>Список сохраненных токенов ({len(user_tokens)}):</b>\n\n"
-    
-    # Добавляем информацию о каждом токене в компактном виде
     for i, token_data in enumerate(user_tokens):
         token = token_data["token"]
-        token_short = f"{token[:15]}...{token[-15:]}" if len(token) > 35 else token
+        # Показываем первые и последние 10 символов токена
+        token_preview = f"{token[:10]}...{token[-10:]}" if len(token) > 25 else token
+        token_info = f"<b>#{i+1}</b>: <code>{token_preview}</code>\n"
         
-        # Базовая информация о токене
-        tokens_list += f"<b>{i+1}.</b> <code>{token_short}</code>\n"
-        
-        # Добавляем имя пользователя, если есть
+        # Добавляем информацию о пользователе, если она есть
         if "user_name" in token_data:
-            tokens_list += f"   👤 {token_data['user_name']}"
-            if "user_id" in token_data:
-                tokens_list += f" (ID: {token_data['user_id']})"
-            tokens_list += "\n"
-        
-        # Добавляем время получения токена
-        created_time = int(token_data.get('created_at', 0))
-        if created_time > 0:
-            time_str = datetime.datetime.fromtimestamp(created_time).strftime('%Y-%m-%d %H:%M')
-            tokens_list += f"   ⏰ {time_str}"
-        
-        # Добавляем информацию о сроке действия
-        if token_data.get("is_permanent", False):
-            tokens_list += " | ⌛ Бессрочный\n"
-        elif "expire_time" in token_data and token_data["expire_time"]:
+            token_info += f"👤 <b>Пользователь:</b> {token_data['user_name']}\n"
+            
+        # Добавляем информацию о времени получения
+        if "created_at" in token_data:
+            created_time = datetime.datetime.fromtimestamp(token_data["created_at"]).strftime('%Y-%m-%d %H:%M:%S')
+            token_info += f"⏱ <b>Получен:</b> {created_time}\n"
+            
+        # Добавляем информацию о способе создания токена
+        if "created_via" in token_data:
+            via_method = "API" if token_data["created_via"] == "api" else "Браузер"
+            token_info += f"🔧 <b>Создан через:</b> {via_method}\n"
+            
+        # Добавляем информацию о типе операции API (create/update)
+        if "token_type" in token_data:
+            operation_type = "Создан" if token_data["token_type"] == "create" else "Обновлен"
+            token_info += f"📝 <b>Операция:</b> {operation_type}\n"
+            
+        # Добавляем информацию о родительском токене, если есть
+        if "parent_token" in token_data:
+            parent_preview = f"{token_data['parent_token'][:10]}...{token_data['parent_token'][-10:]}"
+            token_info += f"🔄 <b>На основе:</b> <code>{parent_preview}</code>\n"
+            
+        # Добавляем информацию о сроке действия, если она есть
+        if "expire_time" in token_data and token_data["expire_time"]:
             expire_time = int(token_data["expire_time"])
+            expire_str = datetime.datetime.fromtimestamp(expire_time).strftime('%Y-%m-%d %H:%M:%S')
             # Проверяем, истек ли токен
             if expire_time < time.time():
-                tokens_list += " | ⚠️ <b>ИСТЕК</b>\n"
+                token_info += f"⚠️ <b>ИСТЕК:</b> {expire_str}\n"
             else:
                 # Сколько дней осталось
                 days_left = (expire_time - time.time()) / 86400
-                if days_left < 3:
-                    tokens_list += f" | ⚠️ <b>Осталось {int(days_left)} дн.</b>\n"
-                else:
-                    tokens_list += f" | 📅 Осталось {int(days_left)} дн.\n"
-        elif "duration" in token_data and token_data["duration"]:
-            duration_seconds = int(token_data["duration"])
-            days = duration_seconds // 86400
-            tokens_list += f" | ⌛ {days} дн.\n"
-        else:
-            tokens_list += "\n"
-        
-        # Добавляем разделитель между токенами
-        if i < len(user_tokens) - 1:
-            tokens_list += "───────────────────\n"
+                token_info += f"📅 <b>Действителен до:</b> {expire_str} ({int(days_left)} дн.)\n"
+                
+        response += f"{token_info}\n"
     
-    # Добавляем инструкцию по использованию команд
-    tokens_list += "\n<i>Используйте команды:</i>\n"
-    tokens_list += "/check_token - <i>проверить последний токен</i>\n"
-    tokens_list += "/delete_token - <i>удалить токен</i>\n"
-    
-    # Создаем клавиатуру с кнопками для действий со всеми токенами
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text="🔍 Проверить последний",
-                    callback_data=f"check_token:{user_tokens[0]['token'][:30]}"
-                ),
-                types.InlineKeyboardButton(
-                    text="🗑 Удалить все",
-                    callback_data="delete_all_tokens"
-                )
-            ]
-        ]
-    )
-    
-    # Отправляем сообщение со списком всех токенов
-    await message.reply(tokens_list, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    # Отправляем список токенов
+    await message.reply(response, parse_mode=ParseMode.HTML)
 
 @dp.callback_query(lambda c: c.data == "check_token_manual")
 async def process_check_token_manual(callback_query: types.CallbackQuery, state: FSMContext):
@@ -1463,15 +1436,17 @@ async def process_create_token(callback_query: types.CallbackQuery, state: FSMCo
         
         data = await state.get_data()
         source_token = data.get("source_token")
+        # Добавляем переменную api_operation
+        api_operation = "create"
         
         if not source_token:
             await callback_query.message.edit_text("❌ Токен не найден")
             return
-        
+             
         # Если токен - это словарь, извлекаем строку токена
         if isinstance(source_token, dict):
             source_token = source_token.get("token", "")
-        
+             
         # Очищаем токен от URL и других лишних данных
         if isinstance(source_token, str):
             # Если это URL или JSON, извлекаем только токен
@@ -1483,9 +1458,263 @@ async def process_create_token(callback_query: types.CallbackQuery, state: FSMCo
                     source_token = token_data.get("token", source_token)
                 except:
                     pass
-        
+         
         status_message = await callback_query.message.edit_text(
             f"🔄 Создаем новый токен {'через Tor' if use_tor else 'напрямую'}..."
+        )
+         
+        # Получаем URL API
+        wialon_api_url = get_env_variable("WIALON_API_URL", "https://hst-api.wialon.com/wialon/ajax.html")
+         
+        # 1. Логин через token/login
+        login_params = {
+            "svc": "token/login",
+            "params": json.dumps({
+                "token": source_token,
+                "fl": 7  # Используем флаг 7, чтобы получить полную информацию, включая user_id
+            })
+        }
+         
+        logger.debug(f"Login params: {login_params}")
+        login_result = await make_api_request(wialon_api_url, login_params, use_tor)
+        logger.debug(f"Login result: {login_result}")
+         
+        if "error" in login_result:
+            await status_message.edit_text(f"❌ Ошибка авторизации: {login_result.get('error')}")
+            return
+         
+        # Получаем eid из результата логина
+        session_id = login_result.get("eid")
+        if not session_id:
+            await status_message.edit_text("❌ Не удалось получить ID сессии")
+            return
+        
+        # Получаем user_id напрямую из ответа token/login
+        user_id = login_result.get("user", {}).get("id")
+        if not user_id:
+            await status_message.edit_text("❌ Не удалось получить ID пользователя из ответа")
+            return
+        
+        logger.debug(f"Полученный ID сессии: {session_id}")
+        logger.debug(f"Полученный ID пользователя: {user_id}")
+        
+        # 2. Создание/обновление токена через token/update
+        create_params = {
+            "svc": "token/update",  # Используем token/update как в примере
+            "params": json.dumps({
+                "callMode": "create",
+                "userId": str(user_id),  # обязательно передаём в виде строки
+                "h": "TOKEN",
+                "app": "Wialon Hosting – a platform for GPS monitoring",
+                "at": 0,
+                "dur": 0,
+                "fl": 512,
+                "p": "{}",  # именно строка "{}"
+                "items": []
+            }),
+            "sid": session_id
+        }
+        
+        logger.debug(f"Create params: {create_params}")
+        create_result = await make_api_request(wialon_api_url, create_params, use_tor)
+        logger.debug(f"Create result: {create_result}")
+        
+        if "error" in create_result:
+            await status_message.edit_text(f"❌ Ошибка {('создания' if api_operation=='create' else 'обновления')} токена: {create_result.get('reason', create_result.get('error'))}")
+            return
+             
+        # Получаем новый токен из результата
+        new_token = create_result.get("h")  # В token/update имя токена возвращается в поле "h"
+        if not new_token:
+            await status_message.edit_text(f"❌ Не удалось {('создать' if api_operation=='create' else 'обновить')} токен")
+            return
+             
+        # Сохраняем новый токен как дочерний от исходного
+        # Метод add_token в TokenStorage является синхронным
+        token_storage.add_token(callback_query.from_user.id, new_token, parent_token=source_token)
+        
+        # Сохраняем информацию о токене
+        token_info = {
+            "user_name": login_result.get("au"),
+            "expire_time": login_result.get("tm"),
+            "created_at": int(time.time()),
+            "created_via": "api",  # Помечаем, что токен создан через API
+            "token_type": api_operation  # create или update
+        }
+        token_storage.update_token_info(callback_query.from_user.id, new_token, token_info)
+        
+        await status_message.edit_text(
+            f"✅ Токен успешно {('создан' if api_operation=='create' else 'обновлен')} через API!\n\n"
+            f"🔑 <code>{new_token}</code>",
+            parse_mode=ParseMode.HTML
+        )
+        
+    except Exception as e:
+        logger.error(f"Error creating token: {e}")
+        await callback_query.message.edit_text(f"❌ Произошла ошибка: {str(e)}")
+
+@dp.message(Command(commands=['token_create']))
+async def token_create_command(message: types.Message, state: FSMContext):
+    """Создать новый токен через API (на основе существующего токена)."""
+    # Получаем последний токен пользователя
+    user_tokens = token_storage.get_user_tokens(message.from_user.id)
+    
+    # Создаем клавиатуру для выбора токена
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
+    
+    # Добавляем кнопку для ввода токена вручную
+    keyboard.inline_keyboard.append([
+        types.InlineKeyboardButton(
+            text="✏️ Ввести токен вручную", 
+            callback_data="api_create_token_manual"
+        )
+    ])
+    
+    # Добавляем кнопки для имеющихся токенов, если они есть
+    if user_tokens:
+        for i, token_data in enumerate(user_tokens[:5]):  # Не более 5 токенов
+            token = token_data["token"]
+            token_preview = f"{token[:10]}...{token[-10:]}" if len(token) > 25 else token
+            
+            # Если есть имя пользователя, добавляем его
+            user_info = ""
+            if "user_name" in token_data:
+                user_info = f" ({token_data['user_name']})"
+            
+            keyboard.inline_keyboard.insert(i, [
+                types.InlineKeyboardButton(
+                    text=f"🔑 Токен #{i+1}{user_info}", 
+                    callback_data=f"api_create_token:{i}"
+                )
+            ])
+        
+        message_text = "Выберите токен, на основе которого будет создан новый токен (через API):"
+    else:
+        message_text = "У вас нет сохраненных токенов. Введите токен для создания нового (через API):"
+    
+    await message.reply(
+        message_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "api_create_token_manual")
+async def process_api_create_token_manual(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик для ручного ввода токена для создания нового через API."""
+    await callback_query.answer()
+    
+    await callback_query.message.edit_text(
+        "Пожалуйста, введите токен, на основе которого нужно создать новый (через API):\n\n"
+        "<i>Формат: строка с токеном доступа Wialon</i>",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Устанавливаем состояние для ожидания ввода токена
+    await state.set_state(GetTokenStates.waiting_for_api_source_token)
+
+@dp.message(GetTokenStates.waiting_for_api_source_token)
+async def process_api_source_token_input(message: types.Message, state: FSMContext):
+    """Обработка ввода исходного токена для API создания."""
+    source_token = message.text.strip()
+    
+    if not source_token:
+        await message.reply("❌ Токен не может быть пустым. Пожалуйста, введите токен.")
+        return
+    
+    # Сохраняем токен в состоянии
+    await state.update_data(source_token=source_token)
+    
+    # Показываем выбор режима подключения
+    await show_api_connection_choice(message, state, source_token)
+
+async def show_api_connection_choice(message, state: FSMContext, token: str):
+    """Показать выбор режима подключения для API создания/обновления токена."""
+    await state.update_data(source_token=token)
+    
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="🔒 Через Tor", callback_data="api_token_action:yes"),
+                types.InlineKeyboardButton(text="🚀 Напрямую", callback_data="api_token_action:no")
+            ]
+        ]
+    )
+    
+    # Проверяем, это сообщение или колбэк
+    if hasattr(message, 'reply'):
+        # Это сообщение Message
+        await message.reply(
+            f"Выберите режим подключения для работы с токеном:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        # Это сообщение от callback_query
+        await message.edit_text(
+            f"Выберите режим подключения для работы с токеном:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+
+@dp.callback_query(lambda c: c.data.startswith("api_create_token:"))
+async def process_api_token_selection(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора токена из списка для API создания."""
+    # Получаем индекс токена
+    index = int(callback_query.data.split(":")[1])
+    user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+    token = user_tokens[index]["token"]
+    
+    # Сохраняем выбранный токен и тип операции
+    await state.update_data(source_token=token, api_operation="create")
+    
+    # Показываем выбор режима подключения
+    await show_api_connection_choice(callback_query.message, state, token)
+
+@dp.callback_query(lambda c: c.data.startswith("api_token_action:"))
+async def process_api_token_action(callback_query: types.CallbackQuery, state: FSMContext):
+    """Создание/обновление токена через API."""
+    try:
+        await callback_query.answer()
+        use_tor = callback_query.data.split(":")[1] == "yes"
+        
+        data = await state.get_data()
+        source_token = data.get("source_token")
+        api_operation = data.get("api_operation", "create")  # По умолчанию - создание
+        token_to_update = data.get("token_to_update")  # Токен для обновления (только для операции update)
+        
+        if not source_token:
+            await callback_query.message.edit_text("❌ Токен не найден")
+            return
+             
+        # Проверяем наличие токена для обновления при операции update
+        if api_operation == "update" and not token_to_update:
+            await callback_query.message.edit_text("❌ Токен для обновления не найден")
+            return
+            
+        # Очищаем токен от URL и других лишних данных
+        if isinstance(source_token, str):
+            if "access_token=" in source_token:
+                source_token = source_token.split("access_token=")[1].split("&")[0]
+            elif source_token.startswith("{") and "token" in source_token:
+                try:
+                    token_data = json.loads(source_token)
+                    source_token = token_data.get("token", source_token)
+                except:
+                    pass
+        
+        # Также очищаем токен для обновления, если он есть
+        if api_operation == "update" and isinstance(token_to_update, str):
+            if "access_token=" in token_to_update:
+                token_to_update = token_to_update.split("access_token=")[1].split("&")[0]
+            elif token_to_update.startswith("{") and "token" in token_to_update:
+                try:
+                    token_data = json.loads(token_to_update)
+                    token_to_update = token_data.get("token", token_to_update)
+                except:
+                    pass
+        
+        status_message = await callback_query.message.edit_text(
+            f"🔄 {('Создаем' if api_operation=='create' else 'Обновляем')} токен {'через Tor' if use_tor else 'напрямую'}..."
         )
         
         # Получаем URL API
@@ -1496,7 +1725,7 @@ async def process_create_token(callback_query: types.CallbackQuery, state: FSMCo
             "svc": "token/login",
             "params": json.dumps({
                 "token": source_token,
-                "fl": 1
+                "fl": 7  # Используем флаг 7, чтобы получить полную информацию, включая user_id
             })
         }
         
@@ -1507,26 +1736,38 @@ async def process_create_token(callback_query: types.CallbackQuery, state: FSMCo
         if "error" in login_result:
             await status_message.edit_text(f"❌ Ошибка авторизации: {login_result.get('error')}")
             return
-        
+             
         # Получаем eid из результата логина
         session_id = login_result.get("eid")
         if not session_id:
             await status_message.edit_text("❌ Не удалось получить ID сессии")
             return
         
-        logger.debug(f"Полученный ID сессии: {session_id}")
+        # Получаем user_id напрямую из ответа token/login
+        user_id = login_result.get("user", {}).get("id")
+        if not user_id:
+            await status_message.edit_text("❌ Не удалось получить ID пользователя из ответа")
+            return
         
-        # 2. Создание нового токена через token/create
+        logger.debug(f"Полученный ID сессии: {session_id}")
+        logger.debug(f"Полученный ID пользователя: {user_id}")
+        
+        # 2. Создание/обновление токена через token/update
+        params = {
+            "callMode": api_operation,  # "create" или "update"
+            "userId": str(user_id),     # обязательно в виде строки
+            "h": "TOKEN" if api_operation == "create" else token_to_update,  # Для обновления используем существующий токен
+            "app": "Wialon Hosting – a platform for GPS monitoring",
+            "at": 0,
+            "dur": 0,
+            "fl": 512,
+            "p": "{}",  # именно строка "{}"
+            "items": []
+        }
+        
         create_params = {
-            "svc": "token/create",
-            "params": json.dumps({
-                "callMode": "create",  # Добавляем обязательный параметр
-                "app": "WialonHostingAPI",  # Используем более простое имя приложения
-                "at": 0,
-                "dur": 8640000,  # 100 дней в секундах
-                "fl": 4294967295,
-                "p": source_token  # Используем исходный токен как параметр
-            }),
+            "svc": "token/update",  # Используем token/update как в примере
+            "params": json.dumps(params),
             "sid": session_id
         }
         
@@ -1535,35 +1776,226 @@ async def process_create_token(callback_query: types.CallbackQuery, state: FSMCo
         logger.debug(f"Create result: {create_result}")
         
         if "error" in create_result:
-            await status_message.edit_text(f"❌ Ошибка создания токена: {create_result.get('reason', create_result.get('error'))}")
+            await status_message.edit_text(f"❌ Ошибка {('создания' if api_operation=='create' else 'обновления')} токена: {create_result.get('reason', create_result.get('error'))}")
             return
-        
+             
         # Получаем новый токен из результата
-        new_token = create_result.get("h")  # В token/create, имя токена возвращается в поле "h"
+        new_token = create_result.get("h")  # В token/update имя токена возвращается в поле "h"
         if not new_token:
-            await status_message.edit_text("❌ Не удалось создать токен")
+            await status_message.edit_text(f"❌ Не удалось {('создать' if api_operation=='create' else 'обновить')} токен")
             return
-        
+             
         # Сохраняем новый токен как дочерний от исходного
-        token_storage.add_token(callback_query.from_user.id, new_token, parent_token=source_token)
+        # Метод add_token в TokenStorage является синхронным
+        if api_operation == "create":
+            # При создании указываем исходный токен как родительский
+            token_storage.add_token(callback_query.from_user.id, new_token, parent_token=source_token)
+        else:
+            # При обновлении сохраняем информацию об обоих токенах
+            token_storage.add_token(callback_query.from_user.id, new_token, parent_token=token_to_update)
         
-        # Сохраняем информацию о токене (время истечения и т.д.) если есть
+        # Сохраняем информацию о токене
         token_info = {
             "user_name": login_result.get("au"),
             "expire_time": login_result.get("tm"),
-            "created_at": int(time.time())
+            "created_at": int(time.time()),
+            "created_via": "api",  # Помечаем, что токен создан через API
+            "token_type": api_operation  # create или update
         }
         token_storage.update_token_info(callback_query.from_user.id, new_token, token_info)
         
         await status_message.edit_text(
-            f"✅ Новый токен успешно создан!\n\n"
+            f"✅ Токен успешно {('создан' if api_operation=='create' else 'обновлен')} через API!\n\n"
             f"🔑 <code>{new_token}</code>",
             parse_mode=ParseMode.HTML
         )
         
     except Exception as e:
-        logger.error(f"Error creating token: {e}")
+        logger.error(f"Error in API token operation: {e}")
         await callback_query.message.edit_text(f"❌ Произошла ошибка: {str(e)}")
+
+@dp.message(Command(commands=['token_update']))
+async def token_update_command(message: types.Message, state: FSMContext):
+    """Обновить существующий токен через API."""
+    # Сначала выбираем исходный токен (для авторизации)
+    user_tokens = token_storage.get_user_tokens(message.from_user.id)
+    
+    # Создаем клавиатуру для выбора токена
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
+    
+    # Добавляем кнопку для ввода токена вручную
+    keyboard.inline_keyboard.append([
+        types.InlineKeyboardButton(
+            text="✏️ Ввести токен вручную", 
+            callback_data="api_update_token_manual"
+        )
+    ])
+    
+    # Добавляем кнопки для имеющихся токенов, если они есть
+    if user_tokens:
+        for i, token_data in enumerate(user_tokens[:5]):  # Не более 5 токенов
+            token = token_data["token"]
+            token_preview = f"{token[:10]}...{token[-10:]}" if len(token) > 25 else token
+            
+            # Если есть имя пользователя, добавляем его
+            user_info = ""
+            if "user_name" in token_data:
+                user_info = f" ({token_data['user_name']})"
+            
+            keyboard.inline_keyboard.insert(i, [
+                types.InlineKeyboardButton(
+                    text=f"🔑 Токен #{i+1}{user_info}", 
+                    callback_data=f"api_update_token:{i}"
+                )
+            ])
+        
+        message_text = "Выберите <b>исходный токен</b> для авторизации (источник):"
+    else:
+        message_text = "У вас нет сохраненных токенов. Введите <b>исходный токен</b> для авторизации:"
+    
+    await message.reply(
+        message_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "api_update_token_manual")
+async def process_api_update_token_manual(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик для ручного ввода токена для обновления через API."""
+    await callback_query.answer()
+    
+    await callback_query.message.edit_text(
+        "Пожалуйста, введите <b>исходный токен</b> для авторизации:\n\n"
+        "<i>Формат: строка с токеном доступа Wialon</i>",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Устанавливаем состояние для ожидания ввода токена
+    await state.set_state(GetTokenStates.waiting_for_api_update_token)
+
+@dp.message(GetTokenStates.waiting_for_api_update_token)
+async def process_api_update_token_input(message: types.Message, state: FSMContext):
+    """Обработка ввода токена для API обновления."""
+    source_token = message.text.strip()
+    
+    if not source_token:
+        await message.reply("❌ Токен не может быть пустым. Пожалуйста, введите токен.")
+        return
+    
+    # Сохраняем исходный токен в состоянии
+    await state.update_data(source_token=source_token)
+    
+    # Теперь запрашиваем токен для обновления
+    await message.reply(
+        "Теперь введите <b>токен для обновления</b> (который нужно обновить):",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Устанавливаем состояние для ожидания ввода токена для обновления
+    await state.set_state(GetTokenStates.waiting_for_token_to_update)
+
+@dp.message(GetTokenStates.waiting_for_token_to_update)
+async def process_token_to_update_input(message: types.Message, state: FSMContext):
+    """Обработка ввода токена, который нужно обновить."""
+    token_to_update = message.text.strip()
+    
+    if not token_to_update:
+        await message.reply("❌ Токен не может быть пустым. Пожалуйста, введите токен для обновления.")
+        return
+    
+    # Сохраняем токен для обновления и тип операции
+    await state.update_data(token_to_update=token_to_update, api_operation="update")
+    
+    # Показываем выбор режима подключения
+    data = await state.get_data()
+    source_token = data.get("source_token")
+    await show_api_connection_choice(message, state, source_token)
+
+@dp.callback_query(lambda c: c.data.startswith("api_update_token:"))
+async def process_api_update_token_selection(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора исходного токена из списка."""
+    # Получаем индекс токена
+    index = int(callback_query.data.split(":")[1])
+    user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+    token = user_tokens[index]["token"]
+    
+    # Сохраняем выбранный исходный токен
+    await state.update_data(source_token=token)
+    
+    # Создаем клавиатуру для выбора токена для обновления
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
+    
+    # Добавляем кнопку для ввода токена вручную
+    keyboard.inline_keyboard.append([
+        types.InlineKeyboardButton(
+            text="✏️ Ввести токен вручную", 
+            callback_data="token_to_update_manual"
+        )
+    ])
+    
+    # Добавляем кнопки для других токенов, исключая выбранный
+    added_tokens = 0
+    for i, token_data in enumerate(user_tokens):
+        # Пропускаем уже выбранный исходный токен
+        if i == index:
+            continue
+            
+        # Ограничиваем до 5 токенов
+        if added_tokens >= 5:
+            break
+            
+        token_to_update = token_data["token"]
+        token_preview = f"{token_to_update[:10]}...{token_to_update[-10:]}" if len(token_to_update) > 25 else token_to_update
+        
+        # Если есть имя пользователя, добавляем его
+        user_info = ""
+        if "user_name" in token_data:
+            user_info = f" ({token_data['user_name']})"
+        
+        keyboard.inline_keyboard.append([
+            types.InlineKeyboardButton(
+                text=f"🔑 Токен #{i+1}{user_info}", 
+                callback_data=f"token_to_update:{i}"
+            )
+        ])
+        added_tokens += 1
+    
+    # Показываем клавиатуру с выбором токена для обновления
+    await callback_query.message.edit_text(
+        "Теперь выберите <b>токен для обновления</b>:",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "token_to_update_manual")
+async def process_token_to_update_manual(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик для ручного ввода токена, который нужно обновить."""
+    await callback_query.answer()
+    
+    await callback_query.message.edit_text(
+        "Пожалуйста, введите <b>токен для обновления</b>:\n\n"
+        "<i>Формат: строка с токеном доступа Wialon</i>",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Устанавливаем состояние для ожидания ввода токена
+    await state.set_state(GetTokenStates.waiting_for_token_to_update)
+
+@dp.callback_query(lambda c: c.data.startswith("token_to_update:"))
+async def process_token_to_update_selection(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора токена для обновления из списка."""
+    # Получаем индекс токена
+    index = int(callback_query.data.split(":")[1])
+    user_tokens = token_storage.get_user_tokens(callback_query.from_user.id)
+    token_to_update = user_tokens[index]["token"]
+    
+    # Сохраняем выбранный токен для обновления и тип операции
+    await state.update_data(token_to_update=token_to_update, api_operation="update")
+    
+    # Показываем выбор режима подключения
+    data = await state.get_data()
+    source_token = data.get("source_token")
+    await show_api_connection_choice(callback_query.message, state, source_token)
 
 async def start_telegram_bot():
     """Запускает Telegram бота."""

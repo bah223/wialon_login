@@ -8,3 +8,6 @@ class GetTokenStates(StatesGroup):
     check_token_mode = State()        # Выбор режима для проверки токена
     waiting_for_token_input = State() # Ожидание ввода токена вручную
     waiting_for_source_token = State() # Ожидание ввода исходного токена для создания нового
+    waiting_for_api_source_token = State() # Ожидание ввода исходного токена для API создания
+    waiting_for_api_update_token = State() # Ожидание ввода токена для API обновления
+    waiting_for_token_to_update = State() # Ожидание ввода токена, который нужно обновить

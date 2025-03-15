@@ -55,13 +55,13 @@ class TokenStorage:
         except Exception as e:
             logger.error(f"Error saving tokens: {e}")
     
-    async def add_token(self, user_id: int, token: str, additional_data: Dict[str, Any] = None) -> None:
+    def add_token(self, user_id: int, token: str, parent_token: str = None) -> None:
         """Добавляет токен в хранилище.
         
         Args:
             user_id: ID пользователя Telegram
             token: Токен доступа
-            additional_data: Дополнительные данные для сохранения
+            parent_token: Исходный токен, на основе которого был создан новый токен
         """
         # Преобразуем аргументы в нужные типы
         user_id = int(user_id) if user_id is not None else 0
@@ -76,17 +76,16 @@ class TokenStorage:
             logger.info(f"Token {token[:8]}... already exists, updating...")
             # Обновляем существующий токен
             self.tokens[token]["updated_at"] = time.time()
-            if additional_data:
-                self.tokens[token].update(additional_data)
+            if parent_token:
+                self.tokens[token]["parent_token"] = parent_token
         else:
             # Добавляем новый токен
             self.tokens[token] = {
                 "user_id": user_id,
                 "created_at": time.time(),
-                "updated_at": time.time()
+                "updated_at": time.time(),
+                "parent_token": parent_token
             }
-            if additional_data:
-                self.tokens[token].update(additional_data)
 
         # Вывод состояния хранилища для отладки
         logger.info(f"Token storage now contains {len(self.tokens)} tokens")
@@ -216,6 +215,33 @@ class TokenStorage:
         
         logger.info(f"Deleted all tokens for user {user_id} (total: {len(tokens_to_delete)})")
         self._save_tokens()
+
+    def update_token_info(self, user_id, token, token_info):
+        """
+        Обновляет информацию о токене.
+        
+        Args:
+            user_id: ID пользователя
+            token: Токен доступа
+            token_info: Словарь с дополнительной информацией о токене
+        """
+        user_id = str(user_id)
+        
+        if user_id not in self.tokens:
+            logger.warning(f"Пользователь {user_id} не найден в хранилище токенов")
+            return False
+        
+        # Находим токен в списке токенов пользователя
+        for i, token_data in enumerate(self.tokens[user_id]):
+            if token_data.get("token") == token:
+                # Обновляем информацию о токене
+                self.tokens[user_id][i].update(token_info)
+                self._save_tokens()
+                logger.info(f"Обновлена информация о токене для пользователя {user_id}")
+                return True
+        
+        logger.warning(f"Токен не найден для пользователя {user_id}")
+        return False
 
 
 # Создаем глобальный экземпляр хранилища в памяти, без файла на диске
