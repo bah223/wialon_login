@@ -999,7 +999,7 @@ async def extend_token_callback(callback_query: types.CallbackQuery):
                         "dur": 8640000,  # 100 дней в секундах
                         "app": app_name,
                         "at": 0,  # Активировать прямо сейчас
-                        "fl": 256,  # Базовый доступ
+                        "fl": 8192,  # Базовый доступ
                         "p": "{}"
                     }),
                     "sid": session_id
@@ -1611,7 +1611,7 @@ async def process_create_token(callback_query: types.CallbackQuery, state: FSMCo
                 "app": "Wialon Hosting – a platform for GPS monitoring",
                 "at": 0,
                 "dur": 0,
-                "fl": 512,
+                "fl": 8192,
                 "p": "{}",  # именно строка "{}"
                 "items": []
             }),
@@ -1863,7 +1863,7 @@ async def process_api_token_action(callback_query: types.CallbackQuery, state: F
             "app": "Wialon Hosting – a platform for GPS monitoring",
             "at": 0,
             "dur": 0,
-            "fl": 512,
+            "fl": 8192,
             "p": "{}",  # именно строка "{}"
             "items": []
         }
