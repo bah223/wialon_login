@@ -151,18 +151,24 @@ async def wialon_login_and_get_url(username: str, password: str, wialon_url: str
     """
     logger.info(f"Starting Wialon login process for user {username} via {'TOR' if use_tor else 'direct connection'}...")
     logger.debug(f"Using credentials: {username}/{'*' * len(password)}")
+    logger.debug(f"Wialon URL: {wialon_url}")
+    logger.debug(f"use_tor: {use_tor}")
     
     # Сохраняем начальный URL для возврата в случае ошибки
     initial_url = wialon_url
     screenshot_path = None
     
     async with async_playwright() as playwright:
+        logger.debug("Playwright started")
         # Инициализируем браузер Chromium в headless или обычном режиме
         browser = await playwright.chromium.launch(headless=True)
+        logger.debug("Chromium browser launched (headless)")
         
         # Создаем новый контекст и страницу
         context = await browser.new_context()
+        logger.debug("New browser context created (direct mode, will be replaced if TOR)")
         page = await context.new_page()
+        logger.debug("New page created")
         
         # Инициализируем current_url с начальным значением
         current_url = initial_url
@@ -170,9 +176,7 @@ async def wialon_login_and_get_url(username: str, password: str, wialon_url: str
         try:
             # Настраиваем контекст с прокси Tor, если флаг use_tor = True
             if use_tor:
-                # Подключаемся к локальному SOCKS5 прокси Tor, работающему на порту 9050
                 logger.info("Setting up TOR proxy (socks5://127.0.0.1:9050)...")
-                # Проверяем доступность прокси Tor
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(5)
@@ -182,108 +186,96 @@ async def wialon_login_and_get_url(username: str, password: str, wialon_url: str
                 except Exception as e:
                     logger.error(f"Failed to connect to Tor proxy: {e}")
                     return {"token": f"Error: Tor proxy not available - {str(e)}", "url": "URL not available"}
-
                 context = await browser.new_context(
                     proxy={
                         "server": "socks5://127.0.0.1:9050",
                         "bypass": "localhost"
                     }
                 )
+                logger.debug("New browser context created with TOR proxy")
             else:
                 context = await browser.new_context()
-            
+                logger.debug("New browser context created (direct connection)")
             # Создаем новую страницу
             page = await context.new_page()
-            
+            logger.debug("New page created after context setup")
             # Открываем страницу Wialon
             logger.info(f"Opening Wialon login page: {wialon_url}")
             await page.goto(wialon_url)
-            
+            logger.debug("Wialon login page loaded")
             # Ожидаем загрузки формы входа и заполняем её
             logger.debug("Waiting for login form...")
-            
             # Ожидаем и заполняем поле имени пользователя
             try:
-                # Сначала пробуем найти поле по ID
                 await page.wait_for_selector("#user", timeout=10000)
+                logger.debug("Username field found by ID")
                 await page.fill("#user", username)
+                logger.debug("Username filled by ID")
             except PlaywrightTimeoutError:
                 try:
-                    # Затем пробуем найти по атрибуту name
                     await page.wait_for_selector("input[name='user']", timeout=10000)
+                    logger.debug("Username field found by name")
                     await page.fill("input[name='user']", username)
+                    logger.debug("Username filled by name")
                 except PlaywrightTimeoutError:
-                    # В крайнем случае ищем любое текстовое поле
                     await page.wait_for_selector("input[type='text']", timeout=10000)
+                    logger.debug("Username field found by type=text")
                     await page.fill("input[type='text']", username)
-            
+                    logger.debug("Username filled by type=text")
             logger.debug("Filling login form...")
-            
             # Ожидаем и заполняем поле пароля
             try:
-                # Сначала пробуем найти поле по ID
                 await page.wait_for_selector("#passw", timeout=5000)
+                logger.debug("Password field found by ID")
                 await page.fill("#passw", password)
+                logger.debug("Password filled by ID")
             except PlaywrightTimeoutError:
                 try:
-                    # Затем пробуем найти по атрибуту name
                     await page.wait_for_selector("input[name='passw']", timeout=5000)
+                    logger.debug("Password field found by name")
                     await page.fill("input[name='passw']", password)
+                    logger.debug("Password filled by name")
                 except PlaywrightTimeoutError:
-                    # В крайнем случае ищем любое поле пароля
                     await page.wait_for_selector("input[type='password']", timeout=5000)
+                    logger.debug("Password field found by type=password")
                     await page.fill("input[type='password']", password)
-            
+                    logger.debug("Password filled by type=password")
             logger.debug("Submitting login form...")
-            
             # Кликаем на кнопку входа
             try:
                 await page.wait_for_selector("#submit", timeout=5000)
+                logger.debug("Submit button found by ID")
                 await page.click("#submit")
+                logger.debug("Clicked submit by ID")
             except PlaywrightTimeoutError:
                 try:
                     await page.wait_for_selector("input[type='submit']", timeout=5000)
+                    logger.debug("Submit button found by type=submit")
                     await page.click("input[type='submit']")
+                    logger.debug("Clicked submit by type=submit")
                 except PlaywrightTimeoutError:
                     await page.press("input[type='password']", "Enter")
-            
-            # Ждем появления сообщения об успешной авторизации или страницы с токеном
+                    logger.debug("Pressed Enter in password field")
             logger.debug("Waiting for login result...")
-            
             # Даем время для обработки запроса
             await asyncio.sleep(2)
-            
+            logger.debug("Slept 2 seconds after submit")
             # Проверяем текст страницы
             page_text = await page.evaluate("() => document.body.innerText")
-            
+            logger.debug(f"Page text after login: {page_text[:100]}")
             if "Authorized successfully" in page_text:
                 logger.info("Login successful, extracting token...")
-                
-                # Получаем cookies
                 cookies = await context.cookies()
                 sid_cookie = next((c for c in cookies if c["name"] == "sid"), None)
-                
                 if sid_cookie:
-                    # Используем cookie sid как токен
                     token = sid_cookie["value"]
                     logger.info(f"Successfully obtained token from cookies: {token[:10]}...")
                     return {"token": token, "url": page.url}
-                
-                # Или извлекаем токен из ответа API
                 try:
-                    # Проверяем локальное хранилище на наличие токена
-                    token = await page.evaluate("""() => {
-                        return localStorage.getItem('token') || 
-                               localStorage.getItem('access_token') || 
-                               sessionStorage.getItem('token') || 
-                               sessionStorage.getItem('access_token');
-                    }""")
-                    
+                    token = await page.evaluate("""() => { return localStorage.getItem('token') || localStorage.getItem('access_token') || sessionStorage.getItem('token') || sessionStorage.getItem('access_token'); }""")
                     if token:
                         logger.info(f"Successfully obtained token from storage: {token[:10]}...")
                         return {"token": token, "url": page.url}
-                    
-                    # Или проверяем URL на наличие токена
                     current_url = page.url
                     token_match = re.search(r"access_token=([^&]+)", current_url)
                     if token_match:
@@ -291,40 +283,29 @@ async def wialon_login_and_get_url(username: str, password: str, wialon_url: str
                         token = urllib.parse.unquote(token)
                         logger.info(f"Successfully obtained token from URL: {token[:10]}...")
                         return {"token": token, "url": page.url}
-                    
-                    # Если ничего не помогло, но авторизация успешна, возвращаем заглушку
                     logger.warning("Login successful but couldn't extract token, using placeholder")
                     return {"token": "AUTHORIZED_SUCCESSFULLY", "url": page.url}
                 except Exception as e:
                     logger.error(f"Error extracting token: {e}")
                     return {"token": f"Error extracting token: {str(e)}", "url": page.url}
             else:
-                # Проверяем, содержит ли URL токен
                 if "access_token" in current_url or "sid=" in current_url:
                     logger.info(f"Login successful, token found in URL: {current_url[:50]}...")
                     return {"token": extract_token(current_url), "url": current_url}
                 else:
-                    # Проверяем, есть ли на странице сообщение об ошибке
                     try:
                         error_text = await page.inner_text("body")
+                        logger.debug(f"Page error text: {error_text[:100]}")
                         if "Invalid user name or password" in error_text:
                             logger.error("Login failed: Invalid username or password")
-                            # Делаем скриншот при ошибке
                             import os
                             import time
-                            
-                            # Создаем директорию для скриншотов, если её нет
                             screenshots_dir = os.path.join(os.getcwd(), "screenshots")
                             os.makedirs(screenshots_dir, exist_ok=True)
-                            
-                            # Генерируем уникальное имя файла
                             timestamp = int(time.time())
                             screenshot_path = os.path.join(screenshots_dir, f"error_{timestamp}.png")
-                            
-                            # Делаем скриншот
                             await page.screenshot(path=screenshot_path)
                             logger.info(f"Screenshot saved to {screenshot_path}")
-                            
                             return {
                                 "token": "Error: Invalid username or password", 
                                 "url": current_url,
@@ -332,22 +313,14 @@ async def wialon_login_and_get_url(username: str, password: str, wialon_url: str
                             }
                         else:
                             logger.error(f"Unknown response: {error_text[:100]}")
-                            # Делаем скриншот при неизвестном ответе
                             import os
                             import time
-                            
-                            # Создаем директорию для скриншотов, если её нет
                             screenshots_dir = os.path.join(os.getcwd(), "screenshots")
                             os.makedirs(screenshots_dir, exist_ok=True)
-                            
-                            # Генерируем уникальное имя файла
                             timestamp = int(time.time())
                             screenshot_path = os.path.join(screenshots_dir, f"error_{timestamp}.png")
-                            
-                            # Делаем скриншот
                             await page.screenshot(path=screenshot_path)
                             logger.info(f"Screenshot saved to {screenshot_path}")
-                            
                             return {
                                 "token": f"Error: Unknown response - {error_text[:100]}", 
                                 "url": current_url,
@@ -355,33 +328,20 @@ async def wialon_login_and_get_url(username: str, password: str, wialon_url: str
                             }
                     except Exception as e:
                         logger.error(f"Error checking for error message: {e}")
-            
-            # Получаем текущий URL после входа
             current_url = page.url
-            
         except Exception as e:
             logger.error(f"Error during Wialon login: {e}")
-            # Пытаемся получить URL даже при ошибке
             try:
                 current_url = page.url
                 logger.info(f"URL at error: {current_url}")
-                
-                # Делаем скриншот при ошибке
                 import os
                 import time
-                
-                # Создаем директорию для скриншотов, если её нет
                 screenshots_dir = os.path.join(os.getcwd(), "screenshots")
                 os.makedirs(screenshots_dir, exist_ok=True)
-                
-                # Генерируем уникальное имя файла
                 timestamp = int(time.time())
                 screenshot_path = os.path.join(screenshots_dir, f"error_{timestamp}.png")
-                
-                # Делаем скриншот
                 await page.screenshot(path=screenshot_path)
                 logger.info(f"Screenshot saved to {screenshot_path}")
-                
                 return {
                     "token": f"Error: {str(e)}", 
                     "url": current_url or initial_url,
@@ -389,7 +349,6 @@ async def wialon_login_and_get_url(username: str, password: str, wialon_url: str
                 }
             except Exception as screenshot_error:
                 logger.error(f"Error taking screenshot: {screenshot_error}")
-                # Если не удалось получить текущий URL или сделать скриншот, возвращаем исходный URL
                 return {
                     "token": f"Error: {str(e)}", 
                     "url": initial_url,

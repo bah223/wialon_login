@@ -8,5 +8,14 @@ python-dotenv>=1.0.0
 pydantic>=2.0.0
 aiosqlite==0.19.0
 loguru==0.7.1
+requests>=2.28.0
 # Опциональная зависимость для лучшей поддержки Tor
 # aiohttp_socks>=0.8.0
+
+# --- DB & migrations ---
+SQLAlchemy>=2.0.0
+alembic>=1.11.0
+psycopg2-binary>=2.9.0
+asyncpg>=0.27.0
+bcrypt>=4.0.0
+passlib>=1.7.4

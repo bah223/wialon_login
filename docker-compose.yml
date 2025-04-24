@@ -8,10 +8,28 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - ./:/app
       - ./data:/app/data
       - ./screenshots:/app/screenshots
     env_file:
       - .env
+    networks:
+      - wialon_network
+    depends_on:
+      - db
+
+  db:
+    image: postgres:15-alpine
+    container_name: wialon_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wialon
+      POSTGRES_PASSWORD: wialonpass
+      POSTGRES_DB: wialon_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
     networks:
       - wialon_network
 
