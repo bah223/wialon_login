@@ -1,8 +1,11 @@
 import asyncio
+import logging
 from app.bot import start_telegram_bot, bot
 from fastapi import FastAPI
 import uvicorn
 from app.utils import logger
+
+logging.basicConfig(level=logging.DEBUG)
 
 # Создаем FastAPI приложение
 app = FastAPI(title="Wialon Login Bot API")

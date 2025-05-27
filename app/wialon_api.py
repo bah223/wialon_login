@@ -1,7 +1,7 @@
 import requests
 import json
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 WIALON_API_URL = os.getenv("WIALON_API_URL", "https://hst-api.wialon.com/wialon/ajax.html")
 
@@ -12,6 +12,57 @@ def wialon_login(token: str, fl: int = 1) -> Dict[str, Any]:
     }
     resp = requests.get(WIALON_API_URL, params=params)
     return resp.json()
+
+async def get_available_objects(sid: str) -> List[Dict[str, Any]]:
+    """Получает список доступных объектов с их правами доступа
+    
+    Args:
+        sid: ID сессии Wialon
+        
+    Returns:
+        List[Dict]: Список объектов с информацией о правах доступа
+    """
+    params = {
+        "svc": "core/search_items",
+        "params": json.dumps({
+            "spec": {
+                "itemsType": "avl_unit",
+                "propName": "sys_name",
+                "propValueMask": "*",
+                "sortType": "sys_name"
+            },
+            "force": 1,
+            "flags": 1,
+            "from": 0,
+            "to": 0
+        }),
+        "sid": sid
+    }
+    
+    resp = requests.get(WIALON_API_URL, params=params)
+    result = resp.json()
+    
+    if "error" in result:
+        return []
+    
+    objects = []
+    for item in result.get("items", []):
+        obj_data = {
+            "id": item.get("id"),
+            "nm": item.get("nm"),  # name
+            "type": "avl_unit",
+            "uacl": item.get("uacl", 0),  # user access level
+            "fl": item.get("fl", 0),  # flags
+            "extra": {
+                "creator": item.get("cr", 0),
+                "creation_time": item.get("ct", 0),
+                "last_message": item.get("lmsg", {}),
+                "group_id": item.get("gd", 0)
+            }
+        }
+        objects.append(obj_data)
+    
+    return objects
 
 def create_token(session_id: str, user_id: int, access_rights: int, duration: int, label: str = "", call_mode: str = "create") -> Dict[str, Any]:
     params = {

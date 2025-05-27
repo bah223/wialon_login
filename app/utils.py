@@ -1,6 +1,8 @@
 from loguru import logger
 import os
 from typing import Optional, List
+from cryptography.fernet import Fernet
+from base64 import b64encode, b64decode
 
 def get_env_variable(var_name: str, default: Optional[str] = None) -> str:
     """
@@ -66,3 +68,29 @@ def get_bool_env_variable(var_name: str, default: bool = False) -> bool:
         return value in ("1", "true", "yes", "y", "on")
     except ValueError:
         return default
+
+def get_encryption_key() -> bytes:
+    """Получить ключ шифрования из переменных окружения или создать новый."""
+    key = os.getenv("ENCRYPTION_KEY")
+    if not key:
+        key = Fernet.generate_key()
+        logger.warning(f"Создан новый ключ шифрования: {key.decode()}. Добавьте его в .env как ENCRYPTION_KEY")
+    return key if isinstance(key, bytes) else key.encode()
+
+def encrypt_password(password: str) -> str:
+    """Зашифровать пароль."""
+    try:
+        f = Fernet(get_encryption_key())
+        return b64encode(f.encrypt(password.encode())).decode()
+    except Exception as e:
+        logger.error(f"Ошибка при шифровании пароля: {e}")
+        return None
+
+def decrypt_password(encrypted_password: str) -> str:
+    """Расшифровать пароль."""
+    try:
+        f = Fernet(get_encryption_key())
+        return f.decrypt(b64decode(encrypted_password)).decode()
+    except Exception as e:
+        logger.error(f"Ошибка при расшифровке пароля: {e}")
+        return None

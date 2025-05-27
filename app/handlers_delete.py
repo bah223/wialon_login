@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 @router.message(Command(commands=["delete_token"]))
 async def delete_token_command(message: types.Message, state: FSMContext):
     async with AsyncSessionLocal() as session:
-        tokens = await get_all_user_tokens(session, str(message.from_user.id))
+        tokens = await get_all_user_tokens(session)
         if not tokens:
             await message.reply("У вас нет токенов для удаления.")
             return
@@ -31,13 +31,16 @@ def waiting_for_token_to_delete_filter(message: types.Message, state: FSMContext
 async def process_token_to_delete(message: types.Message, state: FSMContext):
     token_preview = message.text.strip()
     async with AsyncSessionLocal() as session:
-        tokens = await get_all_user_tokens(session, str(message.from_user.id))
+        tokens = await get_all_user_tokens(session)
         token_obj = next((t for t in tokens if t["token"].startswith(token_preview[:8]) and t["token"].endswith(token_preview[-4:])), None)
         if not token_obj:
             await message.reply("❌ Токен не найден. Попробуйте ещё раз.")
             return
         # Удаление токена из MasterToken/ChildToken реализовать здесь, если требуется
         # await delete_token_by_value(session, token_obj["token"])  # Функция удалена, требуется реализовать логику, если нужно
-        await add_token_history(session, str(message.from_user.id), token_obj["token"], "delete")
+        await add_token_history(session, {
+            "token": token_obj["token"],
+            "action": "delete"
+        })
         await message.reply(f"✅ Токен удалён: <code>{token_obj['token']}</code>", parse_mode="HTML")
         await state.clear()

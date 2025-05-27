@@ -9,52 +9,52 @@ from app.db_utils import get_all_user_tokens
 from app.utils import logger
 from aiogram.enums import ParseMode
 
-def get_tor_choice_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔒 Через Tor", callback_data="check_tor:yes"),
-                InlineKeyboardButton(text="🚀 Напрямую", callback_data="check_tor:no")
-            ]
+def get_tor_choice_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для выбора режима подключения (Tor/прямой)."""
+    buttons = [
+        [
+            types.InlineKeyboardButton(text="🔒 Через Tor", callback_data="check_tor:yes"),
+            types.InlineKeyboardButton(text="🚀 Напрямую", callback_data="check_tor:no")
         ]
-    )
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_manual_token_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Ввести токен вручную", callback_data="check_token_manual")]
-        ]
-    )
+def get_manual_token_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для ручного ввода токена."""
+    buttons = [
+        [types.InlineKeyboardButton(text="✏️ Ввести токен вручную", callback_data="check_token_manual")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_confirm_delete_all_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_delete_all"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_delete_all")
-            ]
+def get_confirm_delete_all_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для подтверждения удаления всех токенов."""
+    buttons = [
+        [
+            types.InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_delete_all"),
+            types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_delete_all")
         ]
-    )
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_connection_choice_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔒 Через Tor", callback_data="use_tor:yes"),
-                InlineKeyboardButton(text="🚀 Напрямую", callback_data="use_tor:no")
-            ]
+def get_connection_choice_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для выбора режима подключения при получении токена."""
+    buttons = [
+        [
+            types.InlineKeyboardButton(text="🔒 Через Tor", callback_data="use_tor:yes"),
+            types.InlineKeyboardButton(text="🚀 Напрямую", callback_data="use_tor:no")
         ]
-    )
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_saved_creds_connection_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔒 Через Tor", callback_data="saved_creds_tor:yes"),
-                InlineKeyboardButton(text="🚀 Напрямую", callback_data="saved_creds_tor:no")
-            ]
+def get_saved_creds_connection_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для выбора режима подключения при использовании сохраненных учетных данных."""
+    buttons = [
+        [
+            types.InlineKeyboardButton(text="🔒 Через Tor", callback_data="saved_creds_tor:yes"),
+            types.InlineKeyboardButton(text="🚀 Напрямую", callback_data="saved_creds_tor:no")
         ]
-    )
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def choose_check_mode(message: types.Message, state: FSMContext):
     """
@@ -97,7 +97,7 @@ async def handle_check_specific_token(callback_query, state, choose_check_mode_f
     await callback_query.answer()
     token_prefix = callback_query.data.split(":")[1]
     async with AsyncSessionLocal() as session:
-        user_tokens = await get_all_user_tokens(session, callback_query.from_user.id)
+        user_tokens = await get_all_user_tokens(session)
     full_token = None
     for token_data in user_tokens:
         if token_data["token"].startswith(token_prefix):

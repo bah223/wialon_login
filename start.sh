@@ -3,11 +3,11 @@
 # Start Tor service
 service tor start
 
-# Wait for Tor to start
-sleep 5
-
-# Run database migrations before starting the app
-alembic upgrade head
+# Wait for Tor SOCKS port to become available
+echo "Waiting for Tor SOCKS port..."
+while ! nc -z localhost 9050; do
+    sleep 1
+done
 
 # Start the application
 python -m app.main 

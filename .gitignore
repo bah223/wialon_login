@@ -22,7 +22,7 @@ wheels/
 *.egg
 
 # Environment variables
-.env
+#.env
 
 # IDE specific files
 .idea/
@@ -35,8 +35,8 @@ wheels/
 Thumbs.db
 
 # Docker
-.docker/
-docker-compose.override.yml
+#.docker/
+#docker-compose.override.yml
 data/
 
 # Logs

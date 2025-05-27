@@ -35,7 +35,6 @@ def upgrade() -> None:
     sa.Column('username', sa.String(), nullable=False),
     sa.Column('hashed_password', sa.String(), nullable=False),
     sa.Column('access_level', sa.Enum('admin', 'user', 'guest', name='accesslevel'), nullable=False),
-    sa.Column('telegram_id', sa.String(), nullable=True),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('username')
     )
